@@ -1,5 +1,7 @@
 # pip install --upgrade google-auth google-auth-oauthlib google-api-python-client
 import argparse
+import base64
+import re
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import json
@@ -96,6 +98,33 @@ def latest_unread_message(service, label="UNREAD", user_id='me', max_results=1):
         return None
 
 
+def decode_b64url(b64_data, charset="utf-8"):
+    """
+    Decode URL-safe base64 (A-Za-z0-9-_), handling missing padding and newlines.
+    Returns (decoded_bytes, decoded_text).
+    """
+    # normalize to bytes
+    if isinstance(b64_data, str):
+        b = b64_data.encode("ascii")
+    else:
+        b = b64_data
+
+    # remove whitespace/newlines that might be in the string
+    b = re.sub(rb"\s+", b"", b)
+
+    # add padding if necessary
+    padding = (-len(b)) % 4
+    if padding:
+        b += b"=" * padding
+
+    decoded_bytes = base64.urlsafe_b64decode(b)
+    decoded_text = decoded_bytes.decode(charset, errors="replace")
+    return decoded_text
+
+
+
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -108,10 +137,20 @@ def main():
         list_labels(service)
 
     else:
+        print("Getting latest unread message for specified label...") 
         message = latest_unread_message(service, label=args.label)
-        print(message)
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace() 
+        print(f"Message preview:\n{str(message['payload'])[:300]}")
 
+        first_body_b64 = message['payload']['parts'][0]['body']['data']
+       
+        body = [] 
+        for part in message['payload']['parts']:
+            body_b64 = part['body']['data']
+            bodypart = decode_b64url(body_b64)
+            body.append(bodypart)
+
+        print(body)
 
 
 if __name__=="__main__":
