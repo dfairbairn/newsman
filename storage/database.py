@@ -48,17 +48,22 @@ class DatabaseManager:
         self.conn.close()
 
 
-if __name__=="__main__":
+DB_PATH = os.path.join(os.path.dirname(__file__), 'emails.db')
+
+
+def ensure_db(db_path: str = DB_PATH) -> DatabaseManager:
+    """Open (or create) the DB and ensure the emails table exists."""
+    db = DatabaseManager(db_path)
+    db.init_db()
+    return db
+
+
+def demo_db(db_path: str = DB_PATH):
     import pickle
 
-    DB_PATH = os.path.join(os.path.dirname(__file__), 'emails.db')
+    db = ensure_db(db_path)
+    print(f"DB ready at {db_path}")
 
-    # 0. Initialize DB
-    db = DatabaseManager(DB_PATH)
-    db.init_db()
-    print(f"DB initialized at {DB_PATH}")
-
-    # 1. Load a sample raw email and insert it
     EXAMPLE_MSG_PATH = os.path.join('output', 'Risky-Biz_1776561469.pkl')
     with open(EXAMPLE_MSG_PATH, 'rb') as f:
         raw_message = pickle.load(f)
@@ -73,8 +78,12 @@ if __name__=="__main__":
     )
     print(f"Inserted email row id={row_id}")
 
-    # 2. Query by label
     rows = db.get_emails_by_label('Risky-Biz')
     print(f"Found {len(rows)} email(s) for label 'Risky-Biz'")
 
     db.close()
+
+
+if __name__ == "__main__":
+    ensure_db()
+    print(f"DB validated at {DB_PATH}")

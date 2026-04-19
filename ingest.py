@@ -64,7 +64,7 @@ def get_labels(service, nondefault_only=True):
         return labels
 
 
-def latest_unread_message(service, label="UNREAD", user_id='me', max_results=1):
+def latest_messages(service, label="UNREAD", user_id='me', max_results=1):
     """
     Workhorse for ingesting from a label
     - userId: 'me'
@@ -124,11 +124,14 @@ def decode_b64url(b64_data, charset="utf-8"):
 
 
 def ingest(label, count_emails):
+    """
+    Retrieve the email objects from the account.
+    """
 
     emails = []
-    for i in range(count_emails):
-            print(f"Getting {i}th latest unread message for specified label...") 
-            message = latest_unread_message(service, label=label)
+    print(f"Retrieving {count_emails} latest unread messages for specified label...") 
+    messages = latest_messages(service,label=label, max_results=count_emails)
+    for message in messages:
 
             print(f"Message preview:\n{str(message['payload'])[:300]}")        
             body = [] 
