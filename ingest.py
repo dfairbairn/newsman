@@ -1,13 +1,14 @@
 # pip install --upgrade google-auth google-auth-oauthlib google-api-python-client
 import argparse
 import base64
-import re
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import json
 import os
+import time
+import re
 
-
+STORAGE_PATH="output"
 DEFAULT_LABELS = [
     "CHAT",
     "SENT",
@@ -122,14 +123,56 @@ def decode_b64url(b64_data, charset="utf-8"):
     return decoded_text
 
 
+def ingest(label, count_emails):
+
+    emails = []
+    for i in range(count_emails):
+            print(f"Getting {i}th latest unread message for specified label...") 
+            message = latest_unread_message(service, label=label)
+
+            print(f"Message preview:\n{str(message['payload'])[:300]}")        
+            body = [] 
+            for part in message['payload']['parts']:
+                body_b64 = part['body']['data']
+                bodypart = decode_b64url(body_b64) + "\n\n\n\nXXXXX\n\n\n\n"
+                body.append(bodypart)
+
+            email = {'body': body, 'raw': message, 'label': label}
+            emails.append(email)
+    return emails
 
 
+def dump_emails(emails):
+    for email in emails:
+        prefix = email['label'].replace(' ', '_')
+        # subj = email['raw']['payload']['parts'][0]['subject'].replace(' ', '_')
+        # fname = f"{prefix}_{subj}_{tstamp}.eml"
+        # with open(os.path.join(STORAGE_PATH, fname), "w") as f:
+        #     for part in body: 
+        #         f.write(part)
+
+        processing_tstamp = round(time.time())
+        dump_name = f"{prefix}_{processing_tstamp}.pkl"
+        import pickle
+        fpath = os.path.join(STORAGE_PATH, dump_name)
+
+        with open(fpath, 'wb') as f:
+            pickle.dump(email['raw'], f)
+
+        
+
+            
+
+# ====================================================================
+#                               Output
+# ====================================================================
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--label", dest="label", help="Ingest message(s) from label")
     parser.add_argument("-mu", "--max-unread", dest="max_unread", help="Max number of unread messages to pull from label") 
+    parser.add_argument("-w", "--write-file", dest="write", action="store_true", help="Write the email body to a time-stamped file")
     args = parser.parse_args()
     
     if not args.label:
@@ -137,21 +180,16 @@ def main():
         list_labels(service)
 
     else:
-        print("Getting latest unread message for specified label...") 
-        message = latest_unread_message(service, label=args.label)
-        # import pdb; pdb.set_trace() 
-        print(f"Message preview:\n{str(message['payload'])[:300]}")
+        valid_mu = args.max_unread and args.max_unread.isdigit() and int(args.max_unread) > 0
+        count_emails = int(args.max_unread) if valid_mu else 1
 
-        first_body_b64 = message['payload']['parts'][0]['body']['data']
-       
-        body = [] 
-        for part in message['payload']['parts']:
-            body_b64 = part['body']['data']
-            bodypart = decode_b64url(body_b64)
-            body.append(bodypart)
+        emails = ingest(args.label, count_emails)
 
-        print(body)
+        if args.write:
+            dump_emails(emails)
+    return emails
 
+        
 
 if __name__=="__main__":
-    main()
+    emails = main()
