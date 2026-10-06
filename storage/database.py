@@ -1,8 +1,11 @@
 import sqlite3
 import os
 
+from storage.models import Email
+
 """
 Email data spec:
+- message_id (RFC822 Message-ID header; stable dedup key, may be empty)
 - Subject (parsed out ... somehow)
 - Body (sanitized content of email parts stuck together)
 - Timestamp
@@ -12,13 +15,23 @@ Email data spec:
 
 CREATE_EMAILS_TABLE = """
 CREATE TABLE IF NOT EXISTS emails (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    subject   TEXT,
-    body      TEXT,
-    timestamp INTEGER,
-    sender    TEXT,
-    label     TEXT NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id      TEXT,
+    subject         TEXT,
+    body            TEXT,
+    timestamp       INTEGER,
+    sender          TEXT,
+    label           TEXT NOT NULL,
+    injection_flags TEXT DEFAULT ''
 );
+"""
+
+# Dedup on (message_id, label): the same message can legitimately appear under
+# multiple labels (stored once per label). Restricted to non-empty message_id so
+# that messages without a Message-ID header don't all collide onto one row.
+CREATE_MESSAGE_ID_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_message_id_label
+    ON emails(message_id, label) WHERE message_id <> '';
 """
 
 
@@ -30,19 +43,53 @@ class DatabaseManager:
 
     def init_db(self):
         self.conn.execute(CREATE_EMAILS_TABLE)
+        self._migrate()
+        # Drop the old single-column index (superseded by the (message_id, label) one).
+        self.conn.execute("DROP INDEX IF EXISTS idx_emails_message_id")
+        self.conn.execute(CREATE_MESSAGE_ID_INDEX)
         self.conn.commit()
 
-    def insert_email(self, subject: str, body: str, timestamp: int, sender: str, label: str) -> int:
+    def _migrate(self):
+        """Bring a pre-existing emails table up to the current schema."""
+        cols = {row['name'] for row in self.conn.execute("PRAGMA table_info(emails)")}
+        if 'message_id' not in cols:
+            self.conn.execute("ALTER TABLE emails ADD COLUMN message_id TEXT DEFAULT ''")
+        if 'injection_flags' not in cols:
+            self.conn.execute("ALTER TABLE emails ADD COLUMN injection_flags TEXT DEFAULT ''")
+
+    def insert_email(self, subject: str, body: str, timestamp: int, sender: str,
+                     label: str, message_id: str = '', injection_flags: str = '') -> int | None:
+        """Insert one email. Returns the new row id, or None if it was a duplicate
+        (same non-empty (message_id, label) already stored)."""
         cur = self.conn.execute(
-            "INSERT INTO emails (subject, body, timestamp, sender, label) VALUES (?, ?, ?, ?, ?)",
-            (subject, body, timestamp, sender, label),
+            "INSERT OR IGNORE INTO emails "
+            "(message_id, subject, body, timestamp, sender, label, injection_flags) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, subject, body, timestamp, sender, label, injection_flags),
         )
         self.conn.commit()
-        return cur.lastrowid
+        return cur.lastrowid if cur.rowcount else None
+
+    def insert_email_obj(self, email: Email) -> int | None:
+        """Insert an Email dataclass. Returns new row id, or None if duplicate."""
+        return self.insert_email(
+            subject=email.subject,
+            body=email.body,
+            timestamp=email.timestamp,
+            sender=email.sender,
+            label=email.label,
+            message_id=email.message_id,
+            injection_flags=email.injection_flags,
+        )
 
     def get_emails_by_label(self, label: str) -> list[sqlite3.Row]:
-        cur = self.conn.execute("SELECT * FROM emails WHERE label = ?", (label,))
+        cur = self.conn.execute(
+            "SELECT * FROM emails WHERE label = ? ORDER BY timestamp DESC", (label,)
+        )
         return cur.fetchall()
+
+    def count_emails(self) -> int:
+        return self.conn.execute("SELECT count(*) FROM emails").fetchone()[0]
 
     def close(self):
         self.conn.close()
@@ -52,38 +99,13 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'emails.db')
 
 
 def ensure_db(db_path: str = DB_PATH) -> DatabaseManager:
-    """Open (or create) the DB and ensure the emails table exists."""
+    """Open (or create) the DB and ensure the emails table/index exist."""
     db = DatabaseManager(db_path)
     db.init_db()
     return db
 
 
-def demo_db(db_path: str = DB_PATH):
-    import pickle
-
-    db = ensure_db(db_path)
-    print(f"DB ready at {db_path}")
-
-    EXAMPLE_MSG_PATH = os.path.join('output', 'Risky-Biz_1776561469.pkl')
-    with open(EXAMPLE_MSG_PATH, 'rb') as f:
-        raw_message = pickle.load(f)
-
-    headers = {h['name']: h['value'] for h in raw_message['payload']['headers']}
-    row_id = db.insert_email(
-        subject=headers.get('Subject', ''),
-        body='',  # populate after sanitization
-        timestamp=int(raw_message.get('internalDate', 0)) // 1000,
-        sender=headers.get('From', ''),
-        label='Risky-Biz',
-    )
-    print(f"Inserted email row id={row_id}")
-
-    rows = db.get_emails_by_label('Risky-Biz')
-    print(f"Found {len(rows)} email(s) for label 'Risky-Biz'")
-
-    db.close()
-
-
 if __name__ == "__main__":
-    ensure_db()
-    print(f"DB validated at {DB_PATH}")
+    db = ensure_db()
+    print(f"DB ready at {DB_PATH} ({db.count_emails()} emails)")
+    db.close()

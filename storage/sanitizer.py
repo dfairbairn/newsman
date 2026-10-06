@@ -66,7 +66,7 @@ def sanitize_email_html(html: str, allow_images: bool = False, strip_styles: boo
         comment.extract()
 
     # Tags to fully remove (and their contents)
-    for tagname in ["script", "iframe", "object", "embed", "link", "form", "meta", "base"]:
+    for tagname in ["script", "style", "iframe", "object", "embed", "link", "form", "meta", "base", "head"]:
         for tag in soup.find_all(tagname):
             tag.decompose()
 
@@ -127,41 +127,48 @@ def sanitize_email_html(html: str, allow_images: bool = False, strip_styles: boo
                              strip_comments=True)
     cleaned = cleaner.clean(cleaned_html_intermediate)
 
-    # 3) Linkify any plain URLs and add rel/noreferrer/noopener
-    cleaned = bleach.linkify(cleaned,
-                             callbacks=[bleach.linkifier.Callback(
-                                 lambda attrs, new: (
-                                     # strip tracking from link again (safety)
-                                     attrs.update({"href": strip_tracking_query_params(attrs.get("href", ""))}) or attrs
-                                 )
-                             )],
-                             parse_email=False)
-
-    # Add rel/noopener for anchor tags (bleach.linkify doesn't always set rel)
-    # small regexp safe post-process
-    cleaned = re.sub(
-        r'<a\s+([^>]*href=[\'"][^\'"]+[\'"][^>]*)>',
-        lambda m: ("<a " + (m.group(1) + ' rel="noopener noreferrer nofollow" target="_blank"').replace(' rel="noopener noreferrer nofollow" rel="', ' rel="noopener noreferrer nofollow" ')),
+    # 3) Linkify any plain URLs, strip tracking params again, and add rel/target.
+    #    bleach linkify callbacks receive attrs keyed by (namespace, name) tuples.
+    cleaned = bleach.linkify(
         cleaned,
-        flags=re.IGNORECASE
+        callbacks=[_strip_tracking_callback, bleach.callbacks.nofollow, bleach.callbacks.target_blank],
+        parse_email=False,
     )
 
     return cleaned
 
+
+def _strip_tracking_callback(attrs, new=False):
+    """bleach.linkify callback: re-strip tracking params from each anchor href."""
+    href_key = (None, "href")
+    if href_key in attrs:
+        attrs[href_key] = strip_tracking_query_params(attrs[href_key])
+    return attrs
 
 
 def html_to_text(html):
     return " ".join(BeautifulSoup(html, "html.parser").stripped_strings)
 
 
+def sanitize_email(raw_body: str, allow_images: bool = False) -> str:
+    """Sanitize a raw email body to safe HTML. Returns the raw input unchanged if
+    sanitization fails, so ingestion never loses content to a sanitizer error."""
+    if not raw_body:
+        return ""
+    try:
+        return sanitize_email_html(raw_body, allow_images=allow_images)
+    except Exception:
+        return raw_body
 
 
 if __name__ == "__main__":
-
-    plain = html_to_text(safe)
-
-    # put your email HTML into sample_html (the big sample you provided)
-    sample_html = """...paste your HTML here..."""
+    sample_html = (
+        '<p onclick="evil()">Hello '
+        '<a href="https://example.com/article?utm_source=news&id=42">read more</a>'
+        '</p><script>alert(1)</script>'
+        '<img src="https://track.example.com/pixel.gif" width="1" height="1">'
+    )
     safe = sanitize_email_html(sample_html, allow_images=False, strip_styles=True)
-    print(safe[:2000])  # preview
+    print("SAFE HTML:", safe)
+    print("AS TEXT  :", html_to_text(safe))
 

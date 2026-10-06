@@ -26,12 +26,23 @@ def fetch_labels(service, nondefault_only=True):
     return labels
 
 
-def fetch_messages(service, label, max_results=1, user_id='me'):
-    """Return a list of full message dicts for the N most recent emails under label."""
+def fetch_messages(service, label, max_results=None, unseen_only=False, since=None, user_id='me'):
+    """Return a list of full message dicts for emails under label.
+
+    - unseen_only=True restricts to unread (Gmail `is:unread`).
+    - since: a datetime/date; restricts to messages after it (Gmail `after:`).
+    - max_results: cap on messages; None leaves the Gmail API default (~100).
+    """
     query = f'label:{label}'
-    results = service.users().messages().list(
-        userId=user_id, q=query, maxResults=max_results, includeSpamTrash=False
-    ).execute()
+    if unseen_only:
+        query += ' is:unread'
+    if since is not None:
+        query += f' after:{int(since.timestamp())}'
+
+    list_kwargs = dict(userId=user_id, q=query, includeSpamTrash=False)
+    if max_results is not None:
+        list_kwargs['maxResults'] = max_results
+    results = service.users().messages().list(**list_kwargs).execute()
 
     stubs = results.get('messages', [])
     if not stubs:
