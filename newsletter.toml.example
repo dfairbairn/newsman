@@ -1,0 +1,14 @@
+title = "Newsletter Aggregator Config"
+
+# OAuth backend (Gmail API). Pair with a token.json from util_create_token.py.
+[oauth]
+sender = "exam@ple.com"
+api_key = "ABcdEfG1aBc-1A23bcdEfHIj_KLmn45OPqRsTuVwX"
+
+# IMAP backend. For Gmail, `password` is a 16-char App Password (needs 2FA enabled),
+#  See https://myaccount.google.com/apppasswords
+# not your login password. `host` defaults to imap.gmail.com if omitted.
+[imap]
+host = "imap.gmail.com"
+sender = "exam@ple.com"
+password = "abcd efgh ijkl mnop"

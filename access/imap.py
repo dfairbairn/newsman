@@ -20,10 +20,15 @@ def fetch_labels(conn):
     return labels
 
 
-def fetch_messages(conn, label, max_results=1):
-    """Return up to max_results recent unseen messages from label as email.message.Message objects."""
-    conn.select(label)
-    status, data = conn.search(None, 'UNSEEN')
+def fetch_messages(conn, label, max_results=1, unseen_only=False):
+    """Return up to max_results recent messages from label as email.message.Message objects.
+
+    Reads with BODY.PEEK[] so fetching does NOT mark messages as seen. Set
+    unseen_only=True to restrict the search to unread messages.
+    """
+    conn.select(label, readonly=True)
+    criteria = 'UNSEEN' if unseen_only else 'ALL'
+    status, data = conn.search(None, criteria)
     msg_ids = data[0].split()
 
     # take the N most recent (IMAP IDs are oldest-first)
@@ -31,7 +36,7 @@ def fetch_messages(conn, label, max_results=1):
 
     messages = []
     for msg_id in recent_ids:
-        status, raw = conn.fetch(msg_id, '(RFC822)')
+        status, raw = conn.fetch(msg_id, '(BODY.PEEK[])')
         msg = email_lib.message_from_bytes(raw[0][1])
         messages.append(msg)
     return messages
