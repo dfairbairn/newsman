@@ -1,5 +1,8 @@
 import email as email_lib
 import imaplib
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def connect(host, user, password):
@@ -25,16 +28,17 @@ def _quote_mailbox(label):
     return '"%s"' % label.replace('"', '\\"')
 
 
-def fetch_messages(conn, label, max_results=None, unseen_only=False, since=None):
+def fetch_messages(conn, label, max_results=None, unseen_only=False, since=None, mark_read=False):
     """Return messages from label as email.message.Message objects.
 
-    - Reads with BODY.PEEK[] and selects readonly, so fetching does NOT mark
-      messages seen.
     - unseen_only=True restricts to unread messages (IMAP UNSEEN).
     - since: a datetime/date; restricts to messages on/after that day (IMAP SINCE).
     - max_results: cap on the number of (most recent) messages; None = no cap.
+    - mark_read: if False (default), reads with BODY.PEEK[] in a readonly mailbox
+      so fetching does NOT mark messages seen (safe for list/pickle/eml). If True,
+      opens the mailbox writable and fetches with RFC822, which sets the \\Seen flag.
     """
-    status, _ = conn.select(_quote_mailbox(label), readonly=True)
+    status, _ = conn.select(_quote_mailbox(label), readonly=not mark_read)
     if status != 'OK':
         raise RuntimeError(f"Could not select mailbox '{label}'")
 
@@ -54,9 +58,12 @@ def fetch_messages(conn, label, max_results=None, unseen_only=False, since=None)
     if max_results is not None:
         msg_ids = msg_ids[-max_results:]
 
+    fetch_item = '(RFC822)' if mark_read else '(BODY.PEEK[])'
+    logger.debug("fetch %s from '%s' (%d msgs, mark_read=%s)",
+                 fetch_item, label, len(msg_ids), mark_read)
     messages = []
     for msg_id in msg_ids:
-        status, raw = conn.fetch(msg_id, '(BODY.PEEK[])')
+        status, raw = conn.fetch(msg_id, fetch_item)
         msg = email_lib.message_from_bytes(raw[0][1])
         messages.append(msg)
     return messages

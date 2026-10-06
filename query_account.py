@@ -5,6 +5,8 @@ backend module under access/ and a matching branch in AccountQuery.__init__.
 """
 import argparse
 import datetime
+import email as email_lib
+import logging
 import os
 import pickle
 import re
@@ -18,11 +20,24 @@ from access import oauth as access_oauth
 from access import imap as access_imap
 from storage.database import ensure_db
 from storage.models import Email
-from storage.sanitizer import sanitize_email
+from storage.sanitizer import PromptInjectionScanner, sanitize_to_text
+
+logger = logging.getLogger('newsletter')
 
 STORAGE_PATH = 'output'
 CONFIG_PATH = 'newsletter.toml'
 BODY_PART_SEP = '\n\n\n\nXXXXX\n\n\n\n'
+
+
+def setup_logging(config: dict):
+    """Configure logging; level comes from [logging].level in the toml (default info)."""
+    level_name = str(config.get('logging', {}).get('level', 'info')).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s %(levelname)-7s %(name)s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
 
 
 def _pick_body(html_parts, text_parts) -> str:
@@ -54,9 +69,11 @@ def _decode_mime_header(value: str) -> str:
     if not value:
         return ''
     try:
-        return str(make_header(decode_header(value)))
+        decoded = str(make_header(decode_header(value)))
     except Exception:
-        return value
+        decoded = value
+    # collapse folded-header newlines / runs of whitespace into single spaces
+    return re.sub(r'\s+', ' ', decoded).strip()
 
 
 def _collect_gmail_parts(payload, html_parts, text_parts):
@@ -120,6 +137,53 @@ def _parse_email_imap(msg, label) -> Email:
     )
 
 
+def _parse_any(raw, label) -> Email:
+    """Parse a raw message of either backend shape into an Email.
+    RFC822 email.message.Message (imap / .eml) vs. Gmail API dict (oauth / pickle)."""
+    if isinstance(raw, email_lib.message.Message):
+        return _parse_email_imap(raw, label)
+    return _parse_email(raw, label)
+
+
+def load_eml(path) -> email_lib.message.Message:
+    """Load a local .eml file as an email.message.Message."""
+    with open(path, 'rb') as f:
+        return email_lib.message_from_binary_file(f)
+
+
+def load_pickle(path):
+    """Load a raw message previously written by the `pickle` command."""
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
+def _raw_to_eml_bytes(raw):
+    """Serialize a raw message to RFC822 .eml bytes, or None if unsupported.
+    imap backend gives email.message.Message (native .eml); Gmail API dicts are
+    not serializable to .eml without a separate format='raw' fetch."""
+    if isinstance(raw, email_lib.message.Message):
+        return raw.as_bytes()
+    return None
+
+
+def process_and_store(email, db, sanitize=True, scanner=None) -> bool:
+    """Sanitize (to clean text), scan for prompt injection, and store one Email.
+    Returns True if a new row was inserted, False if it was a duplicate."""
+    if sanitize:
+        email.body = sanitize_to_text(email.body)
+    if scanner is not None:
+        flags = scanner.scan(email.body)
+        if flags:
+            email.injection_flags = ','.join(flags)
+            logger.warning("prompt-injection indicators %s in [%s] %r",
+                           flags, email.label, email.subject[:70])
+    inserted = db.insert_email_obj(email) is not None
+    logger.debug("%s [%s] %r (body=%d chars)",
+                 'stored' if inserted else 'dup', email.label,
+                 email.subject[:70], len(email.body or ''))
+    return inserted
+
+
 class AccountQuery:
     def __init__(self, backend, token_path='token.json', config=None):
         config = config if config is not None else load_config()
@@ -167,50 +231,64 @@ class AccountQuery:
         return [self._parse(m, label) for m in self._fetch_raw(label, max_results=n)]
 
     def ingest(self, db, label=None, unread=False, since=None, max_results=None,
-               sanitize=True) -> tuple[int, int]:
+               sanitize=True, mark_read=True, scanner=None) -> tuple[int, int]:
         """Fetch emails and store them via the DB. If label is None, ingest across all
-        user labels. unread/since/max_results are passed to the backend; bodies are
-        sanitized unless sanitize=False. Returns (newly_inserted, total_fetched);
+        user labels. unread/since/max_results/mark_read are passed to the backend;
+        bodies are sanitized to clean text unless sanitize=False, and scanned for
+        prompt injection if a scanner is given. Returns (newly_inserted, total_fetched);
         duplicates are skipped by (message_id, label)."""
         labels = [label] if label else self.user_labels()
         total_inserted = total_fetched = 0
         for lbl in labels:
             try:
-                raw = self._fetch_raw(lbl, max_results=max_results, unseen_only=unread, since=since)
+                raw = self._fetch_raw(lbl, max_results=max_results, unseen_only=unread,
+                                      since=since, mark_read=mark_read)
             except Exception as e:
-                print(f"  ! skip '{lbl}': {e}")
+                logger.warning("skip '%s': %s", lbl, e)
                 continue
             inserted = 0
             for r in raw:
                 email = self._parse(r, lbl)
-                if sanitize:
-                    email.body = sanitize_email(email.body)
-                if db.insert_email_obj(email) is not None:
+                if process_and_store(email, db, sanitize=sanitize, scanner=scanner):
                     inserted += 1
             total_inserted += inserted
             total_fetched += len(raw)
-            print(f"  {lbl}: +{inserted} new / {len(raw)} fetched")
+            logger.info("  %s: +%d new / %d fetched", lbl, inserted, len(raw))
         return total_inserted, total_fetched
 
-    def fetch_and_pickle(self, label, n=1):
-        """Retrieve the N most recent emails under label and write each to a pickle file."""
+    def _save_each(self, label, n, suffix, dump):
+        """Shared writer for pickle/eml exports. dump(raw) -> bytes|None."""
         os.makedirs(STORAGE_PATH, exist_ok=True)
-        raw_messages = self._fetch_raw(label, max_results=n)
-        for raw in raw_messages:
+        for raw in self._fetch_raw(label, max_results=n):
             email = self._parse(raw, label)
+            data = dump(raw)
+            if data is None:
+                logger.warning("cannot export %r as .%s for this backend; skipping",
+                               email.subject[:60], suffix)
+                continue
             subject = re.sub(r'[^\w\-]', '_', email.subject or 'no_subject')[:30]
             label_slug = label.replace(' ', '_').replace('/', '.')
-            fname = f"{label_slug}_{subject}_{email.timestamp}_{round(time.time())}.pkl"
+            fname = f"{label_slug}_{subject}_{email.timestamp}_{round(time.time())}.{suffix}"
             fpath = os.path.join(STORAGE_PATH, fname)
             with open(fpath, 'wb') as f:
-                pickle.dump(raw, f)
-            print(f"Wrote {fpath}")
+                f.write(data)
+            logger.info("Wrote %s", fpath)
+
+    def fetch_and_pickle(self, label, n=1):
+        """Retrieve N recent emails under label and write each to a pickle file."""
+        self._save_each(label, n, 'pkl', lambda raw: pickle.dumps(raw))
+
+    def fetch_and_save_eml(self, label, n=1):
+        """Retrieve N recent emails under label and write each as a .eml file.
+        Supported for the imap backend (RFC822 messages); oauth dicts are skipped."""
+        self._save_each(label, n, 'eml', _raw_to_eml_bytes)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Query an email account.")
-    parser.add_argument('--backend', required=True, choices=['oauth', 'imap'],
-                        help="Account access method (required)")
+    parser.add_argument('--backend', choices=['oauth', 'imap'], default=None,
+                        help="Account access method; required for account operations "
+                             "(not for `ingest -f/-p`)")
     sub = parser.add_subparsers(dest='command')
 
     sub.add_parser('labels', help="List all non-default labels")
@@ -223,6 +301,10 @@ def main():
     p_pickle.add_argument('label')
     p_pickle.add_argument('-n', '--count', type=int, default=1)
 
+    p_eml = sub.add_parser('eml', help="Fetch and write emails as .eml files")
+    p_eml.add_argument('label')
+    p_eml.add_argument('-n', '--count', type=int, default=1)
+
     p_ingest = sub.add_parser(
         'ingest', help="Fetch emails into the SQLite store (all user labels by default)")
     p_ingest.add_argument('label', nargs='?', default=None,
@@ -234,16 +316,32 @@ def main():
                                "(default 1w; ignored if --unread with no --since)")
     p_ingest.add_argument('-n', '--count', type=int, default=None,
                           help="Cap messages per label (default: no cap)")
+    p_ingest.add_argument('--keep-unread', action='store_true',
+                          help="Do NOT mark fetched emails as read (default marks them read)")
     p_ingest.add_argument('--no-sanitize', action='store_true',
                           help="Store raw bodies without running the sanitizer")
+    p_ingest.add_argument('-f', '--eml-file', default=None,
+                          help="Ingest a local .eml file instead of fetching (no backend needed)")
+    p_ingest.add_argument('-p', '--pickle-file', default=None,
+                          help="Ingest a local pickle file instead of fetching (no backend needed)")
 
     args = parser.parse_args()
+
+    config = load_config()
+    setup_logging(config)
 
     if not args.command:
         parser.print_help()
         return
 
-    q = AccountQuery(backend=args.backend)
+    # File ingest needs no account connection.
+    if args.command == 'ingest' and (args.eml_file or args.pickle_file):
+        _run_file_ingest(args)
+        return
+
+    if not args.backend:
+        parser.error(f"--backend is required for '{args.command}' (choose oauth or imap)")
+    q = AccountQuery(backend=args.backend, config=config)
 
     if args.command == 'labels':
         q.list_labels()
@@ -257,6 +355,9 @@ def main():
 
     elif args.command == 'pickle':
         q.fetch_and_pickle(args.label, args.count)
+
+    elif args.command == 'eml':
+        q.fetch_and_save_eml(args.label, args.count)
 
     elif args.command == 'ingest':
         # Timespan mode is the default; pure --unread (no --since) ingests all unread.
@@ -273,19 +374,42 @@ def main():
             mode.append('unread')
         if since:
             mode.append(f"since {since:%Y-%m-%d}")
-        print(f"Ingesting [{scope}] ({', '.join(mode) or 'all recent'})"
-              f"{'' if not args.no_sanitize else ' [raw, no sanitize]'} ...")
+        mode.append('keep-unread' if args.keep_unread else 'mark-read')
+        if args.no_sanitize:
+            mode.append('raw')
+        logger.info("Ingesting [%s] (%s) ...", scope, ', '.join(mode))
 
         db = ensure_db()
+        scanner = PromptInjectionScanner()
         try:
             inserted, total = q.ingest(
                 db, label=args.label, unread=args.unread, since=since,
                 max_results=args.count, sanitize=not args.no_sanitize,
+                mark_read=not args.keep_unread, scanner=scanner,
             )
-            print(f"Done: {inserted} new / {total} fetched "
-                  f"(skipped {total - inserted} duplicate(s)); {db.count_emails()} total in DB")
+            logger.info("Done: %d new / %d fetched (skipped %d duplicate(s)); %d total in DB",
+                        inserted, total, total - inserted, db.count_emails())
         finally:
             db.close()
+
+
+def _run_file_ingest(args):
+    """Ingest a single local .eml or pickle file into the DB (no backend)."""
+    path = args.eml_file or args.pickle_file
+    if not os.path.exists(path):
+        raise SystemExit(f"File not found: {path}")
+    raw = load_eml(path) if args.eml_file else load_pickle(path)
+    label = args.label or 'imported'
+    email = _parse_any(raw, label)
+    db = ensure_db()
+    scanner = PromptInjectionScanner()
+    try:
+        inserted = process_and_store(email, db, sanitize=not args.no_sanitize, scanner=scanner)
+        logger.info("Ingested %s -> [%s] %r: %s; %d total in DB",
+                    path, label, email.subject[:60],
+                    'stored' if inserted else 'duplicate', db.count_emails())
+    finally:
+        db.close()
 
 
 if __name__ == '__main__':

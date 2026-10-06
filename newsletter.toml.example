@@ -1,5 +1,9 @@
 title = "Newsletter Aggregator Config"
 
+# Logging verbosity for all commands. Default is info if omitted.
+[logging]
+level = "info"   # debug | info | warning | error
+
 # OAuth backend (Gmail API). Pair with a token.json from util_create_token.py.
 [oauth]
 sender = "exam@ple.com"

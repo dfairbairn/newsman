@@ -26,12 +26,14 @@ def fetch_labels(service, nondefault_only=True):
     return labels
 
 
-def fetch_messages(service, label, max_results=None, unseen_only=False, since=None, user_id='me'):
+def fetch_messages(service, label, max_results=None, unseen_only=False, since=None,
+                   mark_read=False, user_id='me'):
     """Return a list of full message dicts for emails under label.
 
     - unseen_only=True restricts to unread (Gmail `is:unread`).
     - since: a datetime/date; restricts to messages after it (Gmail `after:`).
     - max_results: cap on messages; None leaves the Gmail API default (~100).
+    - mark_read: if True, removes the UNREAD label from each fetched message.
     """
     query = f'label:{label}'
     if unseen_only:
@@ -48,10 +50,16 @@ def fetch_messages(service, label, max_results=None, unseen_only=False, since=No
     if not stubs:
         return []
 
-    return [
+    messages = [
         service.users().messages().get(userId=user_id, id=s['id'], format='full').execute()
         for s in stubs
     ]
+    if mark_read:
+        for s in stubs:
+            service.users().messages().modify(
+                userId=user_id, id=s['id'], body={'removeLabelIds': ['UNREAD']}
+            ).execute()
+    return messages
 
 
 def decode_b64url(b64_data, charset='utf-8'):
