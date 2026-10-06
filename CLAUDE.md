@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A **newsletter ingestion and summarization system**: it ingests newsletter emails, cleans them, stores them in SQLite, and (planned) summarizes them with an LLM. The email **source is an implementation detail behind a pluggable backend** (`access/`) — Gmail is the current backend, not the point of the project. Treat any specific inbox (Gmail OAuth, IMAP, etc.) as swappable. Early-stage: no tests, lint config, or build step exist yet.
+A **newsletter ingestion and summarization system**: it ingests newsletter emails, cleans them, stores them in SQLite, and (planned) summarizes them with an LLM. The email **source is an implementation detail behind a pluggable backend** (`access/`) — Gmail is the current backend, not the point of the project. Treat any specific inbox (Gmail OAuth, IMAP, etc.) as swappable. Early-stage: no lint config or build step yet, but there is a stdlib `unittest` suite under `tests/`.
 
 ## Commands
 
@@ -30,6 +30,9 @@ python query_account.py ingest <label> -p file.pkl               # ingest a loca
 
 python -m storage.database               # create/migrate/validate storage/emails.db (run as module)
 python -m storage.sanitizer              # sanitizer + injection-scanner self-test
+
+python -m unittest tests.test_newsletter -v   # run the test suite (132 tests, stdlib unittest)
+python -m unittest discover -s tests          # same, via discovery
 ```
 
 ## Architecture
@@ -41,6 +44,7 @@ The flow is **fetch → parse → sanitize → store → summarize**, with the f
 - **`storage/` — persistence + sanitization.** `models.py`: `Email` dataclass (+ `injection_flags`). `database.py`: `DatabaseManager` + `ensure_db()` over one `emails` table. **Idempotent**: `INSERT OR IGNORE` against a *partial* unique index on `(message_id, label)` (`WHERE message_id <> ''`) — one row per message per label; empty-message_id rows never collide. `init_db()` self-migrates (adds `message_id`/`injection_flags`, drops the old single-column index). Run as `python -m storage.database`.
 - **`storage/sanitizer.py` — cleaning + anti-injection** (BeautifulSoup + bleach; needs `beautifulsoup4`, `bleach`, `html5lib`). `sanitize_to_text(raw)` is the ingest entry point: sanitizes HTML (removes `script`/`style`/`head`/dangerous tags *with contents*, strips `on*`/`style`/unsafe `src`/`href`, drops tracking params, removes images, re-linkifies) **then reduces to clean text** (strips zero-width/invisible spacer chars, collapses whitespace) — stored bodies are small, low-noise, summarizer-ready. `PromptInjectionScanner` applies static regex heuristics (instruction-override, role-reassignment, reveal/suppress, exfiltration, chat delimiters, unicode-tag chars, long base64) returning indicator names; ingest records them in `emails.injection_flags` and logs a warning. It flags only — never mutates content.
 - **`llm_summarize.py` — empty placeholder** for the summarization stage.
+- **`tests/` — stdlib `unittest` suite** (`test_newsletter.py`, builders in `helpers.py`; no pytest/deps). 132 tests: parsers, sanitizer, injection scanner, DB dedup/migration, logging, file loaders. `TestGroundTruth` validates parsing against two real `.eml` newsletters in `misc/ground_truth/` — asserts exact subject/sender/message_id/timestamp, that the stored body equals the full decoded HTML part (no truncation), and that ≥90% of the plain-text part's words survive sanitization (content-loss guard). Run from the repo root so `import query_account` resolves.
 
 ## Secrets & environment
 
