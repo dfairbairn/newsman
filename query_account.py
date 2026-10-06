@@ -1,7 +1,7 @@
 """
 Facade for email account operations.
 Supports multiple backends (currently: oauth). Extend by adding a new backend
-module (e.g. access_imap.py) and a matching branch in AccountQuery.__init__.
+module under access/ (e.g. access/imap.py) and a matching branch in AccountQuery.__init__.
 """
 import argparse
 import os
@@ -9,7 +9,8 @@ import pickle
 import re
 import time
 
-import access_oauth
+from access import oauth as access_oauth
+from access import imap as access_imap
 from storage.models import Email
 
 STORAGE_PATH = 'output'
