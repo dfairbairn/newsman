@@ -48,3 +48,20 @@ python query_account.py ingest <label> -p some.pkl            # ingest a local .
 Stored bodies are sanitized to clean text (scripts/trackers/styling removed) and scanned for
 prompt-injection indicators, which are recorded in the `injection_flags` column. Pass
 `--no-sanitize` to store raw bodies.
+
+## Summarize & query
+
+Decompose ingested emails into individual **stories** (stored in a separate `summaries.db`),
+then ask natural-language questions. Requires `[llm].api_key` (an Anthropic key) in
+`newsletter.toml`.
+
+```bash
+python summarize.py extract                       # decompose all un-summarized emails (Batch API, 50% cost)
+python summarize.py extract Risky-Biz --sync -n 2 # one label, synchronous, cap 2 (quick/cheap)
+python summarize.py query "how many ransomware incidents in the last year? list them with links"
+python summarize.py query "what trended on Chinese social media over the last year?"
+python summarize.py stats                         # story counts per newsletter
+```
+
+Extraction is idempotent (re-runs skip already-processed emails). Query answers cite each story
+with its newsletter, date, URLs, and a Gmail link back to the original email.

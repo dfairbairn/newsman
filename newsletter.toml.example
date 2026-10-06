@@ -4,6 +4,12 @@ title = "Newsletter Aggregator Config"
 [logging]
 level = "info"   # debug | info | warning | error
 
+# Summarization engine (summarize.py). Needs an Anthropic API key.
+[llm]
+api_key = "sk-ant-..."
+extract_model = "claude-opus-4-8"
+query_model = "claude-opus-4-8"
+
 # OAuth backend (Gmail API). Pair with a token.json from util_create_token.py.
 [oauth]
 sender = "exam@ple.com"

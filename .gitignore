@@ -2,3 +2,4 @@ newsletter.toml
 token.json
 *.pyc
 *.har
+storage/*.db
