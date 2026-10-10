@@ -138,22 +138,23 @@ class TestLedger(unittest.TestCase):
 # Extraction plumbing (no API)
 # --------------------------------------------------------------------------- #
 class TestExtractPlumbing(unittest.TestCase):
-    def test_record_tool_schema_enum_matches_categories(self):
-        enum = RECORD = ex.RECORD_TOOL["input_schema"]["properties"]["stories"]["items"]
-        self.assertEqual(enum["properties"]["category"]["enum"], list(get_args(Category)))
-        self.assertFalse(enum["additionalProperties"])
-        self.assertIn("title", enum["required"])
+    def test_record_schema_enum_matches_categories(self):
+        item = ex.RECORD_SCHEMA["properties"]["stories"]["items"]
+        self.assertEqual(item["properties"]["category"]["enum"], list(get_args(Category)))
+        self.assertFalse(item["additionalProperties"])
+        self.assertIn("title", item["required"])
 
-    def test_parse_tool_result(self):
-        blk = SimpleNamespace(type="tool_use", name="record_stories", input={
-            "stories": [{"title": "T", "summary": "S", "category": "other",
-                         "keywords": ["k"], "urls": []}]})
-        ext = ex._parse_tool_result([blk])
+    def test_parse_extraction_from_json_text(self):
+        import json as _json
+        blk = SimpleNamespace(type="text", text=_json.dumps(
+            {"stories": [{"title": "T", "summary": "S", "category": "other",
+                          "keywords": ["k"], "urls": []}]}))
+        ext = ex._parse_extraction([blk])
         self.assertEqual(len(ext.stories), 1)
 
-    def test_parse_tool_result_empty_when_absent(self):
-        blk = SimpleNamespace(type="text", text="hi")
-        self.assertEqual(ex._parse_tool_result([blk]).stories, [])
+    def test_parse_extraction_empty_when_absent(self):
+        blk = SimpleNamespace(type="tool_use", name="x", input={})
+        self.assertEqual(ex._parse_extraction([blk]).stories, [])
 
     def test_candidate_emails_skips_summarized_and_empty(self):
         edb = DatabaseManager(':memory:')
@@ -208,6 +209,126 @@ class TestQueryHelpers(unittest.TestCase):
                       "message_id": ""})
         self.assertEqual(out["source_email_link"], "")
         self.assertEqual(out["date"], "")
+
+
+# --------------------------------------------------------------------------- #
+# Structure-preserving sanitization (for the story counter)
+# --------------------------------------------------------------------------- #
+class TestStructuredText(unittest.TestCase):
+    def test_preserves_paragraph_breaks(self):
+        from storage.sanitizer import html_to_structured_text
+        out = html_to_structured_text("<p>First story.</p><p>Second story.</p>")
+        self.assertIn("First story.", out)
+        self.assertIn("Second story.", out)
+        self.assertIn("\n", out)  # not collapsed to one line
+
+    def test_hr_becomes_divider(self):
+        from storage.sanitizer import html_to_structured_text
+        out = html_to_structured_text("<p>A</p><hr><p>B</p>")
+        self.assertIn("---", out)
+
+    def test_sanitize_to_text_is_structured_and_clean(self):
+        from storage.sanitizer import sanitize_to_text
+        out = sanitize_to_text("<p>Hello <script>x()</script></p><hr><p>world</p>")
+        self.assertIn("Hello", out)
+        self.assertIn("world", out)
+        self.assertNotIn("<", out)
+        self.assertIn("\n", out)
+        self.assertIn("---", out)  # <hr> survives sanitization as a section divider
+
+    def test_html_to_text_still_single_line(self):
+        # flat extractor unchanged (backward compat)
+        from storage.sanitizer import html_to_text
+        self.assertEqual(html_to_text("<p>a</p><p>b</p>"), "a b")
+
+
+# --------------------------------------------------------------------------- #
+# Quarantine
+# --------------------------------------------------------------------------- #
+class TestQuarantine(unittest.TestCase):
+    def setUp(self):
+        self.db = SummaryDB(':memory:')
+        self.db.init_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_quarantine_records_and_lists(self):
+        self.db.quarantine_email('<m@x>', 'L', 'Sub', 'snd', 123, 'instruction_override')
+        self.assertEqual(self.db.quarantine_count(), 1)
+        row = self.db.list_quarantine()[0]
+        self.assertEqual(row['subject'], 'Sub')
+        self.assertEqual(row['injection_flags'], 'instruction_override')
+
+    def test_quarantine_marks_ledger_so_future_runs_skip(self):
+        self.db.quarantine_email('<m@x>', 'L', 'Sub', 'snd', 123, 'reveal_prompt')
+        # recorded in the ledger -> excluded from future candidate selection
+        self.assertTrue(self.db.is_summarized('<m@x>', 'L'))
+        self.assertIn(('<m@x>', 'L'), self.db.summarized_keys())
+
+
+class TestQuarantineSplit(unittest.TestCase):
+    def setUp(self):
+        self.db = SummaryDB(':memory:')
+        self.db.init_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _row(self, mid, flags=''):
+        return {'message_id': mid, 'label': 'L', 'subject': 's', 'sender': 'a',
+                'timestamp': 1, 'body': 'b', 'injection_flags': flags}
+
+    def test_disabled_passes_all_through(self):
+        rows = [self._row('<a@x>', 'reveal_prompt'), self._row('<b@x>')]
+        to_proc, n = ex._quarantine_split(self.db, rows, quarantine_sketchy=False)
+        self.assertEqual(len(to_proc), 2)
+        self.assertEqual(n, 0)
+        self.assertEqual(self.db.quarantine_count(), 0)
+
+    def test_enabled_diverts_flagged_only(self):
+        rows = [self._row('<a@x>', 'reveal_prompt'), self._row('<b@x>')]
+        to_proc, n = ex._quarantine_split(self.db, rows, quarantine_sketchy=True)
+        self.assertEqual([r['message_id'] for r in to_proc], ['<b@x>'])
+        self.assertEqual(n, 1)
+        self.assertTrue(self.db.is_summarized('<a@x>', 'L'))      # quarantined -> skipped later
+        self.assertFalse(self.db.is_summarized('<b@x>', 'L'))
+
+
+# --------------------------------------------------------------------------- #
+# Two-pass extraction plumbing (no API)
+# --------------------------------------------------------------------------- #
+class TestCounterPlumbing(unittest.TestCase):
+    def test_count_schema(self):
+        sch = ex.COUNT_SCHEMA
+        self.assertEqual(set(sch["required"]), {"count", "is_list_of_items"})
+        self.assertFalse(sch["additionalProperties"])
+        self.assertEqual(sch["properties"]["count"]["type"], "integer")
+
+    def test_extract_hint_mentions_count_and_no_merge_for_lists(self):
+        row = {'label': 'L', 'subject': 's', 'sender': 'a', 'body': 'b'}
+        hint = ex._extract_user_content(row, 7, True)
+        self.assertIn("7", hint)
+        self.assertIn("per item", hint.lower())
+
+    def test_params_use_models_and_low_effort(self):
+        row = {'label': 'L', 'subject': 's', 'sender': 'a', 'body': 'b'}
+        cp = ex._count_params("claude-haiku-5-5", row)
+        ep = ex._extract_params("claude-sonnet-5-5", row, 3, False)
+        self.assertEqual(cp["model"], "claude-haiku-5-5")
+        self.assertEqual(ep["model"], "claude-sonnet-5-5")
+        self.assertEqual(ep["output_config"]["effort"], "low")
+        # structured outputs (not forced tool_choice, unsupported on 5.5 models)
+        self.assertEqual(ep["output_config"]["format"]["schema"], ex.RECORD_SCHEMA)
+        self.assertNotIn("tool_choice", ep)
+        # thinking omitted (its valid "off" value differs per model)
+        self.assertNotIn("thinking", cp)
+        self.assertNotIn("thinking", ep)
+
+    def test_default_models_are_cheaper_tier(self):
+        self.assertEqual(ex.DEFAULT_EXTRACT_MODEL, "claude-sonnet-5-5")
+        self.assertEqual(ex.DEFAULT_COUNT_MODEL, "claude-haiku-5-5")
+
 
 
 if __name__ == "__main__":

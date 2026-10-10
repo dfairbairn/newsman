@@ -23,11 +23,15 @@ def main():
     p_ex.add_argument('-n', '--limit', type=int, default=None, help="Cap emails processed")
     p_ex.add_argument('--sync', action='store_true',
                       help="Synchronous extraction (default: Batch API, 50%% cheaper)")
+    p_ex.add_argument('--quarantine-sketchy', action='store_true',
+                      help="Divert injection-flagged emails to the quarantine bin instead of "
+                           "summarizing them (they stay excluded from future runs)")
 
     p_q = sub.add_parser('query', help="Ask a natural-language question of the archive")
     p_q.add_argument('question')
 
     sub.add_parser('stats', help="Show story counts by newsletter")
+    sub.add_parser('quarantine', help="List emails diverted to the quarantine bin")
 
     args = parser.parse_args()
     cfg = load_config()
@@ -42,9 +46,13 @@ def main():
         since_ts = None
         if args.since:
             since_ts = int(_parse_duration(args.since).timestamp())
-        emails, stories = run_extract(
-            label=args.label, since=since_ts, limit=args.limit, sync=args.sync, config=cfg)
-        print(f"Extracted {stories} story(ies) from {emails} email(s).")
+        emails, stories, quarantined = run_extract(
+            label=args.label, since=since_ts, limit=args.limit, sync=args.sync,
+            quarantine_sketchy=args.quarantine_sketchy, config=cfg)
+        msg = f"Extracted {stories} story(ies) from {emails} email(s)."
+        if quarantined:
+            msg += f" Quarantined {quarantined} flagged email(s)."
+        print(msg)
 
     elif args.command == 'query':
         from summaries.query import run_query
@@ -57,6 +65,24 @@ def main():
             print(f"Total stories: {db.total_stories()}")
             for row in db.list_labels():
                 print(f"  {row['stories']:>4}  {row['label']}")
+            qn = db.quarantine_count()
+            if qn:
+                print(f"Quarantined emails: {qn}  (see `summarize.py quarantine`)")
+        finally:
+            db.close()
+
+    elif args.command == 'quarantine':
+        from summaries.db import ensure_summary_db
+        import datetime
+        db = ensure_summary_db()
+        try:
+            rows = db.list_quarantine()
+            if not rows:
+                print("Quarantine bin is empty.")
+            for r in rows:
+                when = datetime.datetime.fromtimestamp(r['quarantined_ts']).strftime('%Y-%m-%d')
+                print(f"[{when}] {r['label']} | {r['subject']}")
+                print(f"    flags: {r['injection_flags']}")
         finally:
             db.close()
 

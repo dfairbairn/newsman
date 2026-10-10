@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS summarized_emails (
 );
 """
 
+CREATE_QUARANTINE = """
+CREATE TABLE IF NOT EXISTS quarantine (
+    message_id      TEXT NOT NULL,
+    label           TEXT NOT NULL,
+    subject         TEXT,
+    sender          TEXT,
+    published_ts    INTEGER,
+    injection_flags TEXT,
+    quarantined_ts  INTEGER,
+    PRIMARY KEY (message_id, label)
+);
+"""
+
 CREATE_FTS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS stories_fts
     USING fts5(title, summary, keywords, story_id UNINDEXED);
@@ -70,6 +83,7 @@ class SummaryDB:
         self.conn.execute(CREATE_STORIES)
         self.conn.execute(CREATE_KEYWORDS)
         self.conn.execute(CREATE_LEDGER)
+        self.conn.execute(CREATE_QUARANTINE)
         self.conn.execute(CREATE_FTS)
         for stmt in INDEXES:
             self.conn.execute(stmt)
@@ -109,6 +123,25 @@ class SummaryDB:
             (message_id, label, n_stories, status, int(time.time())),
         )
         self.conn.commit()
+
+    def quarantine_email(self, message_id: str, label: str, subject: str = '', sender: str = '',
+                         published_ts: int = 0, injection_flags: str = ''):
+        """Divert a flagged email to the quarantine bin AND mark it processed in the
+        ledger so future extraction runs skip it (it is never summarized)."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO quarantine "
+            "(message_id, label, subject, sender, published_ts, injection_flags, quarantined_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, label, subject, sender, published_ts, injection_flags, int(time.time())),
+        )
+        self.record_email(message_id, label, 0, status='quarantined')
+
+    def list_quarantine(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM quarantine ORDER BY quarantined_ts DESC")]
+
+    def quarantine_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0]
 
     # ---- idempotency --------------------------------------------------------
     def is_summarized(self, message_id: str, label: str) -> bool:

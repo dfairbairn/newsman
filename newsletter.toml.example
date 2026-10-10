@@ -1,14 +1,17 @@
 title = "Newsletter Aggregator Config"
 
 # Logging verbosity for all commands. Default is info if omitted.
+# Logs are also written to [logging].file (default logs/newsletter.log); set file = "" to disable.
 [logging]
 level = "info"   # debug | info | warning | error
+file = "logs/newsletter.log"
 
 # Summarization engine (summarize.py). Needs an Anthropic API key.
 [llm]
 api_key = "sk-ant-..."
-extract_model = "claude-opus-4-8"
-query_model = "claude-opus-4-8"
+extract_model = "claude-sonnet-5-5"   # story extraction (cheaper than Opus)
+count_model = "claude-haiku-5-5"      # cheap pre-pass: counts stories per email
+query_model = "claude-opus-4-8"       # natural-language querying
 
 # OAuth backend (Gmail API). Pair with a token.json from util_create_token.py.
 [oauth]

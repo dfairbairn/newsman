@@ -24,7 +24,7 @@ _UNICODE_TAGS_RE = re.compile(r"[\U000E0000-\U000E007F]")
 
 # ------- Configuration -------
 ALLOWED_TAGS = [
-    "a","abbr","b","blockquote","br","code","div","em","i","li","ol","p","pre",
+    "a","abbr","b","blockquote","br","code","div","em","hr","i","li","ol","p","pre",
     "span","strong","ul","table","thead","tbody","tr","td","th","img","h1","h2","h3","h4","h5","h6"
 ]
 ALLOWED_ATTRIBUTES = {
@@ -194,13 +194,36 @@ def sanitize_email(raw_body: str, allow_images: bool = False) -> str:
         return raw_body
 
 
+_BLOCK_TAGS = ["p", "div", "li", "tr", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6"]
+
+
+def html_to_structured_text(html: str) -> str:
+    """Extract readable text while PRESERVING coarse structure: paragraph breaks and
+    horizontal rules (`<hr>` -> a '---' line). This keeps the story boundaries that a
+    'how many stories' counter and the extractor rely on, which the flat html_to_text
+    (single-line) would erase — important for link-roundup / 'in other news' newsletters."""
+    soup = BeautifulSoup(html, "html.parser")
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for hr in soup.find_all("hr"):
+        hr.replace_with("\n\n---\n\n")   # section separator the counter can see
+    for tag in soup.find_all(_BLOCK_TAGS):
+        tag.append("\n\n")               # end each block with a paragraph break
+    text = clean_invisible(soup.get_text())
+    # collapse 3+ newlines to a single blank line; trim trailing spaces per line
+    text = _BLANKLINES_RE.sub("\n\n", text)
+    text = "\n".join(line.rstrip() for line in text.split("\n"))
+    return text.strip()
+
+
 def sanitize_to_text(raw_body: str, allow_images: bool = False) -> str:
-    """Sanitize a raw email body and reduce it to clean text (no layout/styling).
-    This is the form stored for summarization: relevant content, minimal noise."""
+    """Sanitize a raw email body and reduce it to clean, structure-preserving text
+    (no layout tables / styling, but paragraph and section breaks kept). This is the
+    form stored for summarization: relevant content, minimal noise, boundaries intact."""
     if not raw_body:
         return ""
     try:
-        return html_to_text(sanitize_email_html(raw_body, allow_images=allow_images))
+        return html_to_structured_text(sanitize_email_html(raw_body, allow_images=allow_images))
     except Exception:
         logger.exception("sanitize_to_text failed; falling back to raw text")
         return clean_invisible(raw_body)

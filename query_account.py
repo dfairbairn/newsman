@@ -30,14 +30,23 @@ BODY_PART_SEP = '\n\n\n\nXXXXX\n\n\n\n'
 
 
 def setup_logging(config: dict):
-    """Configure logging; level comes from [logging].level in the toml (default info)."""
-    level_name = str(config.get('logging', {}).get('level', 'info')).upper()
+    """Configure logging. Level from [logging].level (default info). By default also
+    writes to a log file on disk ([logging].file, default logs/newsletter.log); set
+    [logging].file = "" to disable file logging."""
+    log_cfg = config.get('logging', {})
+    level_name = str(log_cfg.get('level', 'info')).upper()
     level = getattr(logging, level_name, logging.INFO)
+    handlers = [logging.StreamHandler()]
+    logfile = log_cfg.get('file', 'logs/newsletter.log')
+    if logfile:
+        os.makedirs(os.path.dirname(logfile) or '.', exist_ok=True)
+        handlers.append(logging.FileHandler(logfile, encoding='utf-8'))
     logging.basicConfig(
         level=level,
         format='%(asctime)s %(levelname)-7s %(name)s: %(message)s',
-        datefmt='%H:%M:%S',
+        datefmt='%Y-%m-%d %H:%M:%S',
         force=True,
+        handlers=handlers,
     )
 
 
@@ -326,6 +335,13 @@ def main():
     p_ingest.add_argument('-p', '--pickle-file', default=None,
                           help="Ingest a local pickle file instead of fetching (no backend needed)")
 
+    p_san = sub.add_parser(
+        'sanitize', help="Sanitize a local .eml/.pkl and print the result (no backend)")
+    p_san.add_argument('-f', '--eml-file', default=None, help="Path to a local .eml file")
+    p_san.add_argument('-p', '--pickle-file', default=None, help="Path to a local pickle file")
+    p_san.add_argument('--html', action='store_true',
+                       help="Output sanitized HTML instead of clean text")
+
     args = parser.parse_args()
 
     config = load_config()
@@ -335,7 +351,10 @@ def main():
         parser.print_help()
         return
 
-    # File ingest needs no account connection.
+    # These commands operate on local files and need no account connection.
+    if args.command == 'sanitize':
+        _run_sanitize(args)
+        return
     if args.command == 'ingest' and (args.eml_file or args.pickle_file):
         _run_file_ingest(args)
         return
@@ -411,6 +430,23 @@ def _run_file_ingest(args):
                     'stored' if inserted else 'duplicate', db.count_emails())
     finally:
         db.close()
+
+
+def _run_sanitize(args):
+    """Sanitize a single local .eml or pickle file and print the result (no backend)."""
+    from storage.sanitizer import sanitize_email, sanitize_to_text, PromptInjectionScanner
+    path = args.eml_file or args.pickle_file
+    if not path:
+        raise SystemExit("Provide -f <file.eml> or -p <file.pkl> to sanitize.")
+    if not os.path.exists(path):
+        raise SystemExit(f"File not found: {path}")
+    raw = load_eml(path) if args.eml_file else load_pickle(path)
+    email = _parse_any(raw, 'sanitize')
+    text = sanitize_to_text(email.body)
+    flags = PromptInjectionScanner().scan(text)
+    logger.info("sanitized %s (subject=%r, %d chars, injection_flags=%s)",
+                path, (email.subject or '')[:60], len(text), ','.join(flags) or 'none')
+    print(sanitize_email(email.body) if args.html else text)
 
 
 if __name__ == '__main__':
