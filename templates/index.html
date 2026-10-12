@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Newsman</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --panel2:#20242e; --fg:#e6e8ec; --muted:#9aa3b2;
+          --accent:#6ea8fe; --border:#2a2f3a; --flag:#e0893b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); display:flex;
+           align-items:baseline; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:20px; margin:0; }
+  #stats { color:var(--muted); font-size:13px; }
+  .tabs { display:flex; gap:4px; padding:10px 20px 0; }
+  .tab { padding:8px 16px; cursor:pointer; border:1px solid var(--border);
+         border-bottom:none; border-radius:8px 8px 0 0; background:var(--panel); color:var(--muted); }
+  .tab.active { background:var(--panel2); color:var(--fg); }
+  main { padding:16px 20px 60px; }
+  .panel { display:none; } .panel.active { display:block; }
+  .filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+  input,select,textarea,button { font:inherit; color:var(--fg); background:var(--panel);
+    border:1px solid var(--border); border-radius:6px; padding:7px 9px; }
+  input::placeholder { color:var(--muted); }
+  button { background:var(--accent); color:#06101f; border:none; font-weight:600; cursor:pointer; }
+  button.secondary { background:var(--panel2); color:var(--fg); border:1px solid var(--border); font-weight:400; }
+  textarea { width:100%; min-height:70px; resize:vertical; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+          padding:12px 14px; margin-bottom:10px; }
+  .card h3 { margin:0 0 4px; font-size:16px; }
+  .meta { color:var(--muted); font-size:12.5px; margin-bottom:6px; display:flex; gap:10px; flex-wrap:wrap; }
+  .chip { background:var(--panel2); border:1px solid var(--border); border-radius:999px;
+          padding:1px 9px; font-size:12px; }
+  .chip.flag { color:var(--flag); border-color:var(--flag); }
+  a { color:var(--accent); }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--border); font-size:13.5px; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  tr.email-row { cursor:pointer; } tr.email-row:hover { background:var(--panel); }
+  #emailBody { white-space:pre-wrap; background:var(--panel); border:1px solid var(--border);
+               border-radius:10px; padding:14px; margin-top:12px; max-height:50vh; overflow:auto; }
+  #answer { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+            padding:14px; margin-top:12px; white-space:pre-wrap; min-height:40px; }
+  .muted { color:var(--muted); } .hint { color:var(--muted); font-size:12.5px; margin:6px 0 0; }
+  .spin { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>📰 Newsman</h1>
+  <span id="stats" class="muted">loading…</span>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-tab="stories">Stories</div>
+  <div class="tab" data-tab="ask">Ask (AI)</div>
+  <div class="tab" data-tab="emails">Emails</div>
+</div>
+
+<main>
+  <!-- STORIES -->
+  <section class="panel active" id="panel-stories">
+    <div class="filters">
+      <input id="s-text" placeholder="full-text search…" style="min-width:200px">
+      <input id="s-keyword" placeholder="tag / keyword">
+      <select id="s-label"><option value="">all newsletters</option></select>
+      <select id="s-category"><option value="">all categories</option>
+        {% for c in categories %}<option value="{{c}}">{{c}}</option>{% endfor %}
+      </select>
+      <input id="s-since" type="date" title="since">
+      <input id="s-until" type="date" title="until">
+      <input id="s-limit" type="number" value="50" min="1" max="500" style="width:80px" title="limit">
+      <button onclick="searchStories()">Search</button>
+    </div>
+    <div id="stories"></div>
+  </section>
+
+  <!-- ASK -->
+  <section class="panel" id="panel-ask">
+    <textarea id="q" placeholder="e.g. How many cyber-incident stories in the last 90 days? List a few with links."></textarea>
+    <div style="margin-top:8px"><button onclick="ask()">Ask</button>
+      <span class="hint">Uses the Anthropic API (requires [llm].api_key). Tag/full-text search above is free.</span></div>
+    <div id="answer" class="muted">Answers appear here.</div>
+  </section>
+
+  <!-- EMAILS -->
+  <section class="panel" id="panel-emails">
+    <div class="filters">
+      <select id="e-label"><option value="">all labels</option></select>
+      <label class="muted"><input type="checkbox" id="e-flagged"> flagged only</label>
+      <input id="e-limit" type="number" value="100" min="1" max="1000" style="width:80px" title="limit">
+      <button onclick="loadEmails()">Load</button>
+    </div>
+    <table><thead><tr><th>Date</th><th>Newsletter</th><th>Subject</th><th>Flags</th></tr></thead>
+      <tbody id="emails"></tbody></table>
+    <div id="emailBody" style="display:none"></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s??'').toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#panel-' + t.dataset.tab).classList.add('active');
+});
+
+async function jget(u){ const r = await fetch(u); return r.json(); }
+
+async function init(){
+  const st = await jget('/api/stats');
+  $('#stats').textContent = `${st.stories} stories · ${st.emails} emails · ${st.quarantined} quarantined`;
+  const labels = await jget('/api/labels');
+  for (const l of labels) $('#s-label').add(new Option(`${l.label} (${l.stories})`, l.label));
+  const el = await jget('/api/email_labels');
+  for (const l of el) $('#e-label').add(new Option(`${l.label} (${l.n})`, l.label));
+  searchStories();
+}
+
+async function searchStories(){
+  const p = new URLSearchParams();
+  for (const [k,id] of [['text','s-text'],['keyword','s-keyword'],['label','s-label'],
+    ['category','s-category'],['since','s-since'],['until','s-until'],['limit','s-limit']]){
+    const v = $('#'+id).value.trim(); if (v) p.set(k, v);
+  }
+  $('#stories').innerHTML = '<p class="spin">searching…</p>';
+  const rows = await jget('/api/stories?' + p);
+  if (!rows.length){ $('#stories').innerHTML = '<p class="muted">No stories match.</p>'; return; }
+  $('#stories').innerHTML = rows.map(r => `
+    <div class="card">
+      <h3>${esc(r.title)}</h3>
+      <div class="meta">
+        <span class="chip">${esc(r.category)}</span>
+        <span>${esc(r.newsletter)}</span><span>${esc(r.date)}</span>
+        ${r.injection_flags ? `<span class="chip flag">⚠ ${esc(r.injection_flags)}</span>` : ''}
+      </div>
+      <div>${esc(r.summary)}</div>
+      <div class="meta" style="margin-top:8px">
+        ${(r.urls||[]).map(u => `<a href="${esc(u)}" target="_blank" rel="noopener">source</a>`).join(' ')}
+        ${r.source_email_link ? `<a href="${esc(r.source_email_link)}" target="_blank" rel="noopener">✉ original email</a>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+async function ask(){
+  const q = $('#q').value.trim(); if (!q) return;
+  $('#answer').className = ''; $('#answer').innerHTML = '<span class="spin">thinking…</span>';
+  const r = await fetch('/api/query', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({question:q})});
+  const d = await r.json();
+  $('#answer').textContent = r.ok ? d.answer : ('Error: ' + (d.error||r.status));
+}
+
+async function loadEmails(){
+  const p = new URLSearchParams();
+  if ($('#e-label').value) p.set('label', $('#e-label').value);
+  if ($('#e-flagged').checked) p.set('flagged','1');
+  p.set('limit', $('#e-limit').value||'100');
+  const rows = await jget('/api/emails?' + p);
+  $('#emailBody').style.display = 'none';
+  $('#emails').innerHTML = rows.map(r => `
+    <tr class="email-row" onclick="viewEmail(${r.id})">
+      <td>${new Date((r.timestamp||0)*1000).toISOString().slice(0,10)}</td>
+      <td>${esc(r.label)}</td><td>${esc(r.subject)}</td>
+      <td>${r.injection_flags ? `<span class="chip flag">⚠</span> ${esc(r.injection_flags)}` : ''}</td>
+    </tr>`).join('') || '<tr><td colspan="4" class="muted">No emails.</td></tr>';
+}
+
+async function viewEmail(id){
+  const d = await jget('/api/emails/' + id);
+  const b = $('#emailBody');
+  b.style.display = 'block';
+  b.innerHTML = `<b>${esc(d.subject)}</b>\n<span class="muted">${esc(d.sender)} · ${esc(d.label)}`
+    + `${d.injection_flags ? ' · ⚠ '+esc(d.injection_flags) : ''}</span>\n\n` + esc(d.body);
+  b.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+init();
+</script>
+</body>
+</html>

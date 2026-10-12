@@ -1,0 +1,13 @@
+From: ByteByteGo <bytebytego@newsletter.com>
+Subject: Rotating service-account keys without downtime
+Message-ID: <legit-devops-003@newsletter.com>
+Date: Fri, 10 Oct 2026 08:00:00 +0000
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<h1>This week: secrets management</h1>
+<p>Our walkthrough shows how to rotate a base64-encoded service-account key. Here is an
+example (redacted) token payload you might see in a Kubernetes secret:</p>
+<pre>eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9eyJzdWIiOiJzZXJ2aWNlLWFjY291bnQiLCJuYW1lIjoiZXhhbXBsZSIsImlhdCI6MTUxNjIzOTAyMiwicm9sZSI6ImRlcGxveWVyIiwiaXNzIjoiYnl0ZWJ5dGVnby1kZW1vIiwiYXVkIjoiY2x1c3RlciIsImV4cCI6MTk5OTk5OTk5OX0SGVyZUlzU29tZVBhZGRpbmdUb01ha2VUaGlzTG9uZ0Vub3VnaFRvTG9va0xpa2VBUmVhbEJsb2JYWFhYWFhYWFg=</pre>
+<p>This is a legitimate technical example, but the long base64 blob trips blob detection.</p>
+</body></html>

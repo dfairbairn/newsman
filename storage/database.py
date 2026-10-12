@@ -88,6 +88,33 @@ class DatabaseManager:
         )
         return cur.fetchall()
 
+    def search_emails(self, label: str = None, flagged_only: bool = False,
+                      limit: int = 200) -> list[sqlite3.Row]:
+        """Metadata-oriented email listing for the web UI (body excluded for size)."""
+        clauses, params = [], []
+        if label:
+            clauses.append("label LIKE ?")
+            params.append(f"%{label}%")
+        if flagged_only:
+            clauses.append("injection_flags <> ''")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            "SELECT id, message_id, subject, sender, timestamp, label, injection_flags, "
+            "length(body) AS body_len FROM emails" + where +
+            " ORDER BY timestamp DESC LIMIT ?", (*params, int(limit))
+        ).fetchall()
+        return rows
+
+    def get_email(self, email_id: int) -> sqlite3.Row:
+        return self.conn.execute(
+            "SELECT * FROM emails WHERE id = ?", (int(email_id),)
+        ).fetchone()
+
+    def email_labels(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT label, COUNT(*) AS n FROM emails GROUP BY label ORDER BY n DESC"
+        ).fetchall()
+
     def count_emails(self) -> int:
         return self.conn.execute("SELECT count(*) FROM emails").fetchone()[0]
 

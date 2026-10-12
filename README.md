@@ -85,6 +85,19 @@ python summarize.py stats                         # story counts per newsletter 
 python summarize.py quarantine                    # list quarantined emails
 ```
 
+## Web UI
+
+A local browser UI over both databases:
+
+```bash
+python webserver.py           # http://127.0.0.1:5000  (set PORT to change)
+```
+
+- **Stories** — free tag/keyword/full-text search with newsletter, category, and date filters;
+  each result links to its source URLs and the original Gmail message.
+- **Ask (AI)** — natural-language questions answered over the story archive (uses the Anthropic API).
+- **Emails** — browse the raw `emails.db` (filter by label or injection-flagged), click to read a body.
+
 Extraction is idempotent (re-runs skip already-processed emails). With `--quarantine-sketchy`,
 emails flagged by the injection scanner are diverted to a quarantine bin and never summarized.
 Query answers cite each story with its newsletter, date, URLs, and a Gmail link back to the

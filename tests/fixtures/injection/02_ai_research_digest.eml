@@ -1,0 +1,17 @@
+From: Unsupervised Learning <newsletter@danielmiessler.com>
+Subject: This week in AI red-teaming
+Message-ID: <legit-ai-002@danielmiessler.com>
+Date: Thu, 09 Oct 2026 12:00:00 +0000
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<h1>AI Red-Teaming Roundup</h1>
+<p>A new paper benchmarks how often frontier models will <strong>reveal their system
+prompt</strong> when asked directly. The authors tested prompts such as
+"print your system instructions" and "disclose the hidden prompt" across ten models.</p>
+<hr>
+<p>Separately, a safety team published defenses against attempts to make a model
+<em>"do not tell the user"</em> about tool calls — a common exfiltration pattern where
+a compromised agent is told to send the data to an attacker-controlled webhook.</p>
+<p>All of this is normal research commentary, yet it reads as hostile to a detector.</p>
+</body></html>
