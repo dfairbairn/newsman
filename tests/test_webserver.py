@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import webserver
 from storage.database import DatabaseManager
@@ -170,6 +171,69 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(out['date'], '')
 
 
+class TestApiHardening(WebBase):
+    def test_story_urls_only_http(self):
+        s = SummaryDB(self.spath); s.init_db()
+        s.add_story(Story(title="Sneaky", summary="x", category="trend", keywords=["sneaky"],
+                          urls=["javascript:alert(1)", "https://ok.example", " JavaScript:x",
+                                "data:text/html,x", "http://also.ok", "//evil"]),
+                    message_id="<m3@x>", label="Risky-Biz", published_ts=1790000100)
+        s.close()
+        d = self.c.get('/api/stories?keyword=sneaky').get_json()
+        self.assertEqual(d[0]['urls'], ["https://ok.example", "http://also.ok"])
+
+    def test_limit_garbage_and_clamped(self):
+        for path in ('/api/stories', '/api/emails'):
+            for lim in ('abc', '', '-1', '0', '999999999'):
+                with self.subTest(path=path, limit=lim):
+                    r = self.c.get(f'{path}?limit={lim}')
+                    self.assertEqual(r.status_code, 200)
+        self.assertEqual(webserver._clamp_limit('abc', 50, 500), 50)
+        self.assertEqual(webserver._clamp_limit('-1', 50, 500), 1)
+        self.assertEqual(webserver._clamp_limit('99999', 50, 500), 500)
+        self.assertEqual(webserver._clamp_limit(None, 50, 500), 50)
+        self.assertEqual(webserver._clamp_limit('7', 50, 500), 7)
+
+    def test_negative_limit_not_unbounded(self):
+        s = SummaryDB(self.spath); s.init_db()
+        s.add_story(Story(title="Extra", summary="x", category="trend", keywords=[], urls=[]),
+                    message_id="<m4@x>", label="Risky-Biz", published_ts=1790000200)
+        s.close()
+        self.assertEqual(len(self.c.get('/api/stories?limit=-1').get_json()), 1)
+        self.assertEqual(len(self.c.get('/api/emails?limit=-1').get_json()), 1)
+
+    def test_until_is_inclusive_of_end_day(self):
+        import datetime
+        noon = int(datetime.datetime(2026, 10, 12, 12, 0).timestamp())
+        s = SummaryDB(self.spath); s.init_db()
+        s.add_story(Story(title="Midday", summary="x", category="trend", keywords=["midday"], urls=[]),
+                    message_id="<m5@x>", label="Risky-Biz", published_ts=noon)
+        s.close()
+        d = self.c.get('/api/stories?since=2026-10-12&until=2026-10-12').get_json()
+        self.assertEqual([x['title'] for x in d], ["Midday"])
+        d = self.c.get('/api/stories?until=2026-10-11&keyword=midday').get_json()
+        self.assertEqual(d, [])
+
+    def test_until_inclusive_on_dst_fall_back_day(self):
+        import datetime, time
+        old = os.environ.get('TZ')
+        def restore():
+            if old is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = old
+            time.tzset()
+        self.addCleanup(restore)
+        os.environ['TZ'] = 'America/New_York'; time.tzset()
+        late = int(datetime.datetime(2026, 11, 1, 23, 30).timestamp())
+        s = SummaryDB(self.spath); s.init_db()
+        s.add_story(Story(title="LateDst", summary="x", category="trend", keywords=[], urls=[]),
+                    message_id="<m6@x>", label="Risky-Biz", published_ts=late)
+        s.close()
+        d = self.c.get('/api/stories?since=2026-11-01&until=2026-11-01&text=LateDst').get_json()
+        self.assertEqual([x['title'] for x in d], ["LateDst"])
+
+
 class TestCli(unittest.TestCase):
     def parse(self, *argv):
         return webserver.build_parser().parse_args(list(argv))
@@ -199,6 +263,61 @@ class TestCli(unittest.TestCase):
                 webserver.main(['-a', '--debug'])
         finally:
             webserver.Flask.run = orig_run
+
+    def _main_no_side_effects(self, argv):
+        """Run main() with config/logging/server patched to fail if reached."""
+        with mock.patch.object(webserver, 'load_config',
+                               side_effect=AssertionError("load_config reached")), \
+             mock.patch.object(webserver, 'setup_logging',
+                               side_effect=AssertionError("setup_logging reached")), \
+             mock.patch.object(webserver.Flask, 'run',
+                               side_effect=AssertionError("server should not start")):
+            webserver.main(argv)
+
+    def test_debug_refused_on_non_loopback_hosts(self):
+        for host in ('192.168.1.20', '0', '::0', '0.0.0.0', '::', 'example.com'):
+            with self.subTest(host=host):
+                with self.assertRaises(SystemExit) as cm:
+                    self._main_no_side_effects(['--host', host, '--debug'])
+                self.assertIn('Refusing', str(cm.exception))
+
+    def test_is_loopback(self):
+        for h in ('127.0.0.1', '127.1.2.3', '::1', 'localhost', 'LOCALHOST'):
+            self.assertTrue(webserver._is_loopback(h), h)
+        for h in ('192.168.1.20', '0', '::0', '0.0.0.0', '::', '10.0.0.1', 'example.com'):
+            self.assertFalse(webserver._is_loopback(h), h)
+
+    def test_warns_on_specific_non_loopback_host(self):
+        with mock.patch.object(webserver, 'load_config', return_value={}), \
+             mock.patch.object(webserver, 'setup_logging'), \
+             mock.patch.object(webserver.Flask, 'run'), \
+             self.assertLogs('newsletter.web', level='WARNING') as cm:
+            webserver.main(['--host', '192.168.1.20', '--summaries-db', ':memory:',
+                            '--emails-db', ':memory:'])
+        self.assertIn('no authentication', '\n'.join(cm.output))
+
+    def test_bad_port_env_does_not_break_parser_or_help(self):
+        for bad in ('', 'http'):
+            with self.subTest(PORT=bad), mock.patch.dict(os.environ, {'PORT': bad}):
+                a = self.parse('--port', '8080')
+                self.assertEqual(a.port, 8080)
+                with self.assertRaises(SystemExit) as cm:
+                    webserver.build_parser().parse_args(['--help'])
+                self.assertEqual(cm.exception.code, 0)
+
+    def test_bad_port_env_clean_error_when_used(self):
+        with mock.patch.dict(os.environ, {'PORT': 'http'}):
+            with self.assertRaises(SystemExit) as cm:
+                self._main_no_side_effects([])
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_port_env_used_when_valid_and_no_flag(self):
+        with mock.patch.dict(os.environ, {'PORT': '6000'}), \
+             mock.patch.object(webserver, 'load_config', return_value={}), \
+             mock.patch.object(webserver, 'setup_logging'), \
+             mock.patch.object(webserver.Flask, 'run') as run:
+            webserver.main(['--summaries-db', ':memory:', '--emails-db', ':memory:'])
+        self.assertEqual(run.call_args.kwargs['port'], 6000)
 
 
 if __name__ == "__main__":

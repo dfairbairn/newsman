@@ -9,6 +9,7 @@ Tests inject temp DB paths via create_app(...) and monkeypatch the NL query.
 """
 import argparse
 import datetime
+import ipaddress
 import logging
 import os
 import urllib.parse
@@ -42,6 +43,45 @@ def _epoch(s):
         return None
 
 
+def _epoch_end(s):
+    """Last second of the given calendar day (inclusive 'until' semantics; DST-safe)."""
+    if not s:
+        return None
+    try:
+        d = datetime.datetime.strptime(s, '%Y-%m-%d')
+    except ValueError:
+        return None
+    return int((d + datetime.timedelta(days=1)).timestamp()) - 1
+
+
+def _clamp_limit(raw, default, maximum):
+    """Parse a ?limit= value; garbage -> default, otherwise clamp to 1..maximum."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n, maximum))
+
+
+def _safe_urls(urls) -> list:
+    """Keep only http(s) URLs -- LLM-extracted strings must never become javascript:/data: links."""
+    out = []
+    for u in urls or []:
+        if isinstance(u, str) and u.strip().lower().startswith(('http://', 'https://')):
+            out.append(u)
+    return out
+
+
+def _is_loopback(host: str) -> bool:
+    """True only for hosts that bind to this machine alone (127.0.0.0/8, ::1, localhost)."""
+    if (host or '').lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False        # wildcard shorthand ('0'), hostnames, etc.: assume reachable
+
+
 def _story_out(r: dict) -> dict:
     ts = r.get('published_ts') or 0
     mid = r.get('message_id', '') or ''
@@ -54,7 +94,7 @@ def _story_out(r: dict) -> dict:
         'category': r.get('category'),
         'newsletter': r.get('label'),
         'date': datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else '',
-        'urls': r.get('urls', []),
+        'urls': _safe_urls(r.get('urls', [])),
         'message_id': mid,
         'injection_flags': r.get('injection_flags', ''),
         'source_email_link': link,
@@ -113,8 +153,8 @@ def create_app(summaries_db=None, emails_db=None, config=None) -> Flask:
                 category=request.args.get('category') or None,
                 keyword=request.args.get('keyword') or None,
                 since=_epoch(request.args.get('since')),
-                until=_epoch(request.args.get('until')),
-                limit=int(request.args.get('limit', 50)),
+                until=_epoch_end(request.args.get('until')),
+                limit=_clamp_limit(request.args.get('limit'), 50, 500),
             )
             return jsonify([_story_out(r) for r in rows])
         finally:
@@ -143,7 +183,7 @@ def create_app(summaries_db=None, emails_db=None, config=None) -> Flask:
             rows = e.search_emails(
                 label=request.args.get('label') or None,
                 flagged_only=request.args.get('flagged') == '1',
-                limit=int(request.args.get('limit', 100)),
+                limit=_clamp_limit(request.args.get('limit'), 100, 1000),
             )
             return jsonify([dict(r) for r in rows])
         finally:
@@ -189,7 +229,7 @@ def build_parser():
                       help="interface address to bind (default: 127.0.0.1, local only)")
     host.add_argument('-a', '--all-interfaces', action='store_const', dest='host', const='0.0.0.0',
                       help="bind every interface (same as --host 0.0.0.0)")
-    p.add_argument('-p', '--port', type=int, default=int(os.environ.get('PORT', '5000')),
+    p.add_argument('-p', '--port', type=int, default=None,
                    help="port to listen on (default: $PORT or 5000)")
     p.add_argument('--summaries-db', default=SUMMARIES_DB_PATH,
                    help=f"stories database (default: {os.path.relpath(SUMMARIES_DB_PATH)})")
@@ -201,16 +241,24 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.port is None:                      # resolve $PORT lazily so --help/--port never choke on it
+        env = os.environ.get('PORT', '5000')
+        try:
+            args.port = int(env)
+        except ValueError:
+            parser.error(f"invalid $PORT value {env!r} (expected an integer; or pass --port)")
+    exposed = not _is_loopback(args.host)
+    if exposed and args.debug:
+        raise SystemExit("Refusing --debug on a non-loopback host (the debugger allows code execution).")
     cfg = load_config()
     setup_logging(cfg)
     app = create_app(summaries_db=args.summaries_db, emails_db=args.emails_db, config=cfg)
-    if args.host in ('0.0.0.0', '::'):
-        if args.debug:
-            raise SystemExit("Refusing --debug on all interfaces (the debugger allows code execution).")
-        logger.warning("Listening on ALL interfaces (%s) -- no authentication; anyone who can reach "
+    if exposed:
+        logger.warning("Listening beyond localhost (%s) -- no authentication; anyone who can reach "
                        "port %d can read emails and spend API credit via Ask.", args.host, args.port)
-        logger.info("Newsman web UI → http://127.0.0.1:%d (and this machine's LAN addresses)", args.port)
+        logger.info("Newsman web UI → http://%s:%d", '127.0.0.1' if args.host in ('0.0.0.0', '::', '0', '::0') else args.host, args.port)
     else:
         logger.info("Newsman web UI → http://%s:%d", args.host, args.port)
     app.run(host=args.host, port=args.port, debug=args.debug)
