@@ -4,7 +4,7 @@ title = "Newsletter Aggregator Config"
 # Logs are also written to [logging].file (default logs/newsletter.log); set file = "" to disable.
 [logging]
 level = "info"   # debug | info | warning | error
-file = "logs/newsletter.log"
+file = "logs/newsman.log"
 
 # Summarization engine (summarize.py). Needs an Anthropic API key.
 [llm]

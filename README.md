@@ -38,11 +38,22 @@ python query_account.py --backend imap ingest --unread --keep-unread
 ## Export / import
 
 ```bash
-python query_account.py --backend imap eml <label> -n 1       # save as .eml -> output/
+python query_account.py --backend imap eml --since 90d        # archive raw .eml -> storage/raw_eml/<label>/
 python query_account.py --backend imap pickle <label> -n 1    # save as .pkl -> output/
 
 python query_account.py ingest <label> -f some.eml            # ingest a local .eml
 python query_account.py ingest <label> -p some.pkl            # ingest a local .pkl
+```
+
+The `eml` archive is raw and non-destructive (mailbox left untouched) — ideal for re-running
+sanitization/injection experiments offline. To review which emails trip the injection detector
+*before* summarizing, scan the archive; the matched suspicious segments (with context) are
+written to `logs/newsman.log`:
+
+```bash
+python query_account.py scan                         # scan storage/raw_eml (default)
+python query_account.py scan --dir tests/fixtures/injection   # legit-but-unsafe test emails
+grep -A6 FLAGGED logs/newsman.log                    # review what was flagged and why
 ```
 
 Stored bodies are sanitized to clean (structure-preserving) text — scripts/trackers/styling

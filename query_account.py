@@ -25,19 +25,22 @@ from storage.sanitizer import PromptInjectionScanner, sanitize_to_text
 logger = logging.getLogger('newsletter')
 
 STORAGE_PATH = 'output'
+EML_ARCHIVE_PATH = os.path.join('storage', 'raw_eml')  # raw .eml archive for repeatable experiments
 CONFIG_PATH = 'newsletter.toml'
 BODY_PART_SEP = '\n\n\n\nXXXXX\n\n\n\n'
 
 
 def setup_logging(config: dict):
     """Configure logging. Level from [logging].level (default info). By default also
-    writes to a log file on disk ([logging].file, default logs/newsletter.log); set
-    [logging].file = "" to disable file logging."""
+    writes to a log file on disk ([logging].file, default logs/newsman.log); set
+    [logging].file = "" to disable file logging. Noisy third-party loggers (httpx,
+    anthropic) are pinned to WARNING so our own output — including flagged injection
+    segments — stays readable even at debug level."""
     log_cfg = config.get('logging', {})
     level_name = str(log_cfg.get('level', 'info')).upper()
     level = getattr(logging, level_name, logging.INFO)
     handlers = [logging.StreamHandler()]
-    logfile = log_cfg.get('file', 'logs/newsletter.log')
+    logfile = log_cfg.get('file', 'logs/newsman.log')
     if logfile:
         os.makedirs(os.path.dirname(logfile) or '.', exist_ok=True)
         handlers.append(logging.FileHandler(logfile, encoding='utf-8'))
@@ -48,6 +51,8 @@ def setup_logging(config: dict):
         force=True,
         handlers=handlers,
     )
+    for noisy in ('httpx', 'httpcore', 'anthropic', 'urllib3'):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _pick_body(html_parts, text_parts) -> str:
@@ -165,6 +170,11 @@ def load_pickle(path):
     """Load a raw message previously written by the `pickle` command."""
     with open(path, 'rb') as f:
         return pickle.load(f)
+
+
+def _slug(s: str) -> str:
+    """Filesystem-safe slug for labels/subjects."""
+    return re.sub(r'[^\w\-]', '_', s or '')
 
 
 def _raw_to_eml_bytes(raw):
@@ -288,10 +298,35 @@ class AccountQuery:
         """Retrieve N recent emails under label and write each to a pickle file."""
         self._save_each(label, n, 'pkl', lambda raw: pickle.dumps(raw))
 
-    def fetch_and_save_eml(self, label, n=1):
-        """Retrieve N recent emails under label and write each as a .eml file.
-        Supported for the imap backend (RFC822 messages); oauth dicts are skipped."""
-        self._save_each(label, n, 'eml', _raw_to_eml_bytes)
+    def archive_eml(self, label=None, since=None, max_results=None, out_dir=None) -> int:
+        """Save raw .eml files (non-destructive, BODY.PEEK) into out_dir/<label>/ for
+        repeatable offline experiments. No label = all user labels. Returns files written."""
+        out_dir = out_dir or EML_ARCHIVE_PATH
+        labels = [label] if label else self.user_labels()
+        total = 0
+        for lbl in labels:
+            try:
+                raws = self._fetch_raw(lbl, max_results=max_results, since=since, mark_read=False)
+            except Exception as e:
+                logger.warning("skip '%s': %s", lbl, e)
+                continue
+            lbl_dir = os.path.join(out_dir, _slug(lbl))
+            os.makedirs(lbl_dir, exist_ok=True)
+            saved = 0
+            for raw in raws:
+                data = _raw_to_eml_bytes(raw)
+                if data is None:
+                    logger.warning("cannot export .eml for this backend; skipping")
+                    continue
+                email = self._parse(raw, lbl)
+                fname = f"{email.timestamp}_{_slug(email.subject or 'no_subject')[:40]}.eml"
+                with open(os.path.join(lbl_dir, fname), 'wb') as f:
+                    f.write(data)
+                saved += 1
+            total += saved
+            logger.info("  %s: saved %d .eml", lbl, saved)
+        logger.info("Archived %d .eml file(s) to %s", total, out_dir)
+        return total
 
 
 def main():
@@ -311,9 +346,14 @@ def main():
     p_pickle.add_argument('label')
     p_pickle.add_argument('-n', '--count', type=int, default=1)
 
-    p_eml = sub.add_parser('eml', help="Fetch and write emails as .eml files")
-    p_eml.add_argument('label')
-    p_eml.add_argument('-n', '--count', type=int, default=1)
+    p_eml = sub.add_parser(
+        'eml', help="Archive raw .eml files to storage/raw_eml (non-destructive)")
+    p_eml.add_argument('label', nargs='?', default=None,
+                       help="Label to archive (default: all user labels)")
+    p_eml.add_argument('--since', default=None, help="Only emails newer than e.g. 90d, 2w")
+    p_eml.add_argument('-n', '--count', type=int, default=None, help="Cap messages per label")
+    p_eml.add_argument('--out', default=None,
+                       help=f"Destination directory (default: {EML_ARCHIVE_PATH})")
 
     p_ingest = sub.add_parser(
         'ingest', help="Fetch emails into the SQLite store (all user labels by default)")
@@ -342,6 +382,13 @@ def main():
     p_san.add_argument('--html', action='store_true',
                        help="Output sanitized HTML instead of clean text")
 
+    p_scan = sub.add_parser(
+        'scan', help="Run injection detection over archived .eml/.pkl files; log flagged segments")
+    p_scan.add_argument('--dir', default=None,
+                        help=f"Directory to scan recursively (default: {EML_ARCHIVE_PATH})")
+    p_scan.add_argument('-f', '--eml-file', default=None, help="Scan a single .eml file")
+    p_scan.add_argument('-p', '--pickle-file', default=None, help="Scan a single pickle file")
+
     args = parser.parse_args()
 
     config = load_config()
@@ -354,6 +401,9 @@ def main():
     # These commands operate on local files and need no account connection.
     if args.command == 'sanitize':
         _run_sanitize(args)
+        return
+    if args.command == 'scan':
+        _run_scan(args)
         return
     if args.command == 'ingest' and (args.eml_file or args.pickle_file):
         _run_file_ingest(args)
@@ -377,7 +427,8 @@ def main():
         q.fetch_and_pickle(args.label, args.count)
 
     elif args.command == 'eml':
-        q.fetch_and_save_eml(args.label, args.count)
+        since = _parse_duration(args.since) if args.since else None  # datetime; backend does SINCE
+        q.archive_eml(label=args.label, since=since, max_results=args.count, out_dir=args.out)
 
     elif args.command == 'ingest':
         # Timespan mode is the default; pure --unread (no --since) ingests all unread.
@@ -430,6 +481,48 @@ def _run_file_ingest(args):
                     'stored' if inserted else 'duplicate', db.count_emails())
     finally:
         db.close()
+
+
+def _run_scan(args):
+    """Run injection detection over local .eml/.pkl files and log flagged segments to the
+    log file (logs/newsman.log by default) for review. No backend / no API calls."""
+    from storage.sanitizer import sanitize_to_text, PromptInjectionScanner
+    scanner = PromptInjectionScanner()
+
+    if args.eml_file:
+        files = [(args.eml_file, 'eml')]
+    elif args.pickle_file:
+        files = [(args.pickle_file, 'pkl')]
+    else:
+        root_dir = args.dir or EML_ARCHIVE_PATH
+        files = []
+        for root, _dirs, names in os.walk(root_dir):
+            for n in names:
+                if n.endswith('.eml'):
+                    files.append((os.path.join(root, n), 'eml'))
+                elif n.endswith('.pkl'):
+                    files.append((os.path.join(root, n), 'pkl'))
+
+    logger.info("injection scan: %d file(s)", len(files))
+    flagged = 0
+    for path, kind in files:
+        try:
+            raw = load_eml(path) if kind == 'eml' else load_pickle(path)
+            email = _parse_any(raw, 'scan')
+            hits = scanner.scan_detailed(sanitize_to_text(email.body))
+        except Exception as e:
+            logger.warning("scan error for %s: %s", path, e)
+            continue
+        if not hits:
+            continue
+        flagged += 1
+        indicators = sorted({h['indicator'] for h in hits})
+        logger.warning("FLAGGED %s | %s", os.path.basename(path), (email.subject or '')[:70])
+        logger.warning("    indicators: %s", ', '.join(indicators))
+        for h in hits:
+            logger.warning("    [%s] %s", h['indicator'], h['context'])
+    logger.info("injection scan complete: %d/%d file(s) flagged", flagged, len(files))
+    print(f"Scanned {len(files)} file(s); {flagged} flagged. See the log for suspicious segments.")
 
 
 def _run_sanitize(args):

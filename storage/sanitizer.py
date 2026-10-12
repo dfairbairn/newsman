@@ -250,6 +250,9 @@ class PromptInjectionScanner:
         "jailbreak_terms": r"\b(prompt\s*injection|jailbreak|ignore\s+safety|bypass\s+(your\s+)?(filter|guardrail|restriction)s?)\b",
     }
 
+    _BASE64_RE = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
+    _CONTEXT = 48  # chars of surrounding context to capture around a match
+
     def __init__(self):
         self._compiled = {name: re.compile(p, re.IGNORECASE) for name, p in self.PATTERNS.items()}
 
@@ -261,10 +264,35 @@ class PromptInjectionScanner:
         # structural signals not expressed as a single regex over the final text:
         if _UNICODE_TAGS_RE.search(text):
             hits.add("unicode_tag_chars")
-        base64_blobs = re.findall(r"[A-Za-z0-9+/]{200,}={0,2}", text)
-        if base64_blobs:
+        if self._BASE64_RE.search(text):
             hits.add("long_base64_blob")
         return sorted(hits)
+
+    def _snippet(self, text: str, start: int, end: int) -> dict:
+        s = max(0, start - self._CONTEXT)
+        e = min(len(text), end + self._CONTEXT)
+        prefix = "…" if s > 0 else ""
+        suffix = "…" if e < len(text) else ""
+        context = " ".join(text[s:e].split())  # flatten newlines/whitespace for one-line logs
+        return {"match": text[start:end], "context": f"{prefix}{context}{suffix}"}
+
+    def scan_detailed(self, text: str) -> list[dict]:
+        """Like scan(), but return each hit with the matched text and surrounding context,
+        so a reviewer can see WHY an email was flagged. Each item: {indicator, match, context}."""
+        if not text:
+            return []
+        hits: list[dict] = []
+        for name, rx in self._compiled.items():
+            for m in rx.finditer(text):
+                hits.append({"indicator": name, **self._snippet(text, m.start(), m.end())})
+        for m in _UNICODE_TAGS_RE.finditer(text):
+            hits.append({"indicator": "unicode_tag_chars",
+                         "match": repr(m.group(0)), "context": "(hidden unicode tag char)"})
+        for m in self._BASE64_RE.finditer(text):
+            blob = m.group(0)
+            hits.append({"indicator": "long_base64_blob",
+                         "match": blob[:40] + "…", "context": f"(base64-like blob, {len(blob)} chars)"})
+        return hits
 
 
 _default_scanner = PromptInjectionScanner()

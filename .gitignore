@@ -3,4 +3,5 @@ token.json
 *.pyc
 *.har
 storage/*.db
+storage/raw_eml/
 logs/
