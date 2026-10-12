@@ -90,13 +90,19 @@ python summarize.py quarantine                    # list quarantined emails
 A local browser UI over both databases:
 
 ```bash
-python webserver.py           # http://127.0.0.1:5000  (set PORT to change)
+python webserver.py           # http://127.0.0.1:5000  (local only)
+python webserver.py -p 8080   # different port (or set PORT)
+python webserver.py -a        # --all-interfaces: bind 0.0.0.0 so other machines can reach it
+python webserver.py --help    # all options (--host, --summaries-db, --emails-db, --debug)
 ```
 
 - **Stories** — free tag/keyword/full-text search with newsletter, category, and date filters;
   each result links to its source URLs and the original Gmail message.
 - **Ask (AI)** — natural-language questions answered over the story archive (uses the Anthropic API).
 - **Emails** — browse the raw `emails.db` (filter by label or injection-flagged), click to read a body.
+
+The UI has no authentication: with `-a`/`--host` it exposes email bodies and the paid Ask
+endpoint to anyone who can reach the port, so only do that on a trusted network.
 
 Extraction is idempotent (re-runs skip already-processed emails). With `--quarantine-sketchy`,
 emails flagged by the injection scanner are diverted to a quarantine bin and never summarized.

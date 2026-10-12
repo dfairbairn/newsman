@@ -170,5 +170,36 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(out['date'], '')
 
 
+class TestCli(unittest.TestCase):
+    def parse(self, *argv):
+        return webserver.build_parser().parse_args(list(argv))
+
+    def test_defaults_localhost_only(self):
+        a = self.parse()
+        self.assertEqual(a.host, '127.0.0.1')
+        self.assertFalse(a.debug)
+
+    def test_all_interfaces(self):
+        self.assertEqual(self.parse('--all-interfaces').host, '0.0.0.0')
+        self.assertEqual(self.parse('-a').host, '0.0.0.0')
+
+    def test_explicit_host_and_port(self):
+        a = self.parse('--host', '192.168.1.20', '-p', '8080')
+        self.assertEqual((a.host, a.port), ('192.168.1.20', 8080))
+
+    def test_host_and_all_interfaces_conflict(self):
+        with self.assertRaises(SystemExit):
+            self.parse('--host', '10.0.0.1', '-a')
+
+    def test_debug_refused_on_all_interfaces(self):
+        orig_run = webserver.Flask.run
+        webserver.Flask.run = lambda *a, **k: self.fail("server should not start")
+        try:
+            with self.assertRaises(SystemExit):
+                webserver.main(['-a', '--debug'])
+        finally:
+            webserver.Flask.run = orig_run
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

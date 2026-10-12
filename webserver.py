@@ -3,9 +3,11 @@
 Presents stories (summaries.db) and raw emails (emails.db), supports tag/keyword/
 full-text/date filtering, and an optional LLM-assisted natural-language query.
 
-Run:   python webserver.py          # http://127.0.0.1:5000
+Run:   python webserver.py          # http://127.0.0.1:5000  (--help for options;
+       python webserver.py -a       #  -a/--all-interfaces binds 0.0.0.0)
 Tests inject temp DB paths via create_app(...) and monkeypatch the NL query.
 """
+import argparse
 import datetime
 import logging
 import os
@@ -169,10 +171,50 @@ def create_app(summaries_db=None, emails_db=None, config=None) -> Flask:
     return app
 
 
-if __name__ == '__main__':
+def build_parser():
+    p = argparse.ArgumentParser(
+        description="Local web UI over the newsletter archive: browse/search stories "
+                    "(summaries.db), browse raw emails (emails.db), and ask natural-language "
+                    "questions (Ask tab; uses the Anthropic API).",
+        epilog="examples:\n"
+               "  python webserver.py                     # http://127.0.0.1:5000 (this machine only)\n"
+               "  python webserver.py --port 8080\n"
+               "  python webserver.py --all-interfaces    # listen on 0.0.0.0 (reachable from the LAN)\n"
+               "  python webserver.py --host 192.168.1.20 # bind one specific interface\n\n"
+               "The UI has no authentication and exposes email bodies plus a paid LLM query\n"
+               "endpoint -- only bind beyond localhost on a network you trust.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    host = p.add_mutually_exclusive_group()
+    host.add_argument('--host', default='127.0.0.1',
+                      help="interface address to bind (default: 127.0.0.1, local only)")
+    host.add_argument('-a', '--all-interfaces', action='store_const', dest='host', const='0.0.0.0',
+                      help="bind every interface (same as --host 0.0.0.0)")
+    p.add_argument('-p', '--port', type=int, default=int(os.environ.get('PORT', '5000')),
+                   help="port to listen on (default: $PORT or 5000)")
+    p.add_argument('--summaries-db', default=SUMMARIES_DB_PATH,
+                   help=f"stories database (default: {os.path.relpath(SUMMARIES_DB_PATH)})")
+    p.add_argument('--emails-db', default=EMAILS_DB_PATH,
+                   help=f"emails database (default: {os.path.relpath(EMAILS_DB_PATH)})")
+    p.add_argument('--debug', action='store_true',
+                   help="Flask debug mode (auto-reload + interactive debugger; never with --all-interfaces)")
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     cfg = load_config()
     setup_logging(cfg)
-    app = create_app(config=cfg)
-    port = int(os.environ.get('PORT', '5000'))
-    logger.info("Newsman web UI → http://127.0.0.1:%d", port)
-    app.run(host='127.0.0.1', port=port, debug=False)
+    app = create_app(summaries_db=args.summaries_db, emails_db=args.emails_db, config=cfg)
+    if args.host in ('0.0.0.0', '::'):
+        if args.debug:
+            raise SystemExit("Refusing --debug on all interfaces (the debugger allows code execution).")
+        logger.warning("Listening on ALL interfaces (%s) -- no authentication; anyone who can reach "
+                       "port %d can read emails and spend API credit via Ask.", args.host, args.port)
+        logger.info("Newsman web UI → http://127.0.0.1:%d (and this machine's LAN addresses)", args.port)
+    else:
+        logger.info("Newsman web UI → http://%s:%d", args.host, args.port)
+    app.run(host=args.host, port=args.port, debug=args.debug)
+
+
+if __name__ == '__main__':
+    main()
